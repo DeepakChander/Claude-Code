@@ -1,0 +1,4 @@
+# User workspaces are gitignored except .gitkeep
+*
+!.gitkeep
+!.gitignore
