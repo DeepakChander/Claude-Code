@@ -1,0 +1,299 @@
+{
+  "info": {
+    "name": "OpenAnalyst API",
+    "description": "Claude Code on AWS - API Collection",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://YOUR_EC2_IP:3456",
+      "type": "string"
+    },
+    {
+      "key": "token",
+      "value": "",
+      "type": "string"
+    }
+  ],
+  "item": [
+    {
+      "name": "Health & Info",
+      "item": [
+        {
+          "name": "Health Check",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/health",
+              "host": ["{{baseUrl}}"],
+              "path": ["health"]
+            }
+          }
+        },
+        {
+          "name": "API Info",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/",
+              "host": ["{{baseUrl}}"],
+              "path": [""]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Authentication",
+      "item": [
+        {
+          "name": "Generate Token",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "var jsonData = pm.response.json();",
+                  "if (jsonData.success && jsonData.data && jsonData.data.token) {",
+                  "    pm.collectionVariables.set('token', jsonData.data.token);",
+                  "    console.log('Token saved to collection variables');",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"userId\": \"550e8400-e29b-41d4-a716-446655440000\",\n  \"email\": \"test@example.com\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/auth/token",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "auth", "token"]
+            }
+          }
+        },
+        {
+          "name": "Verify Token",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"token\": \"{{token}}\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/auth/verify",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "auth", "verify"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Agent - CLI Mode",
+      "item": [
+        {
+          "name": "Run (Streaming SSE)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"prompt\": \"List files in this directory\",\n  \"projectId\": \"test-project\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/agent/run",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "agent", "run"]
+            },
+            "description": "Streaming response - use Postman's SSE viewer or curl"
+          }
+        },
+        {
+          "name": "Run Sync (JSON Response)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"prompt\": \"What is 2 + 2?\",\n  \"projectId\": \"test-project\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/agent/run-sync",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "agent", "run-sync"]
+            }
+          }
+        },
+        {
+          "name": "Continue Conversation",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"prompt\": \"Now multiply that by 3\",\n  \"projectId\": \"test-project\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/agent/continue",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "agent", "continue"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Agent - SDK Mode",
+      "item": [
+        {
+          "name": "Run SDK (Streaming)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"prompt\": \"Analyze this workspace\",\n  \"projectId\": \"test-project\",\n  \"allowedTools\": [\"Read\", \"Glob\", \"Grep\"]\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/agent/sdk/run",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "agent", "sdk", "run"]
+            }
+          }
+        },
+        {
+          "name": "Run SDK Sync (JSON)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"prompt\": \"What files are in this project?\",\n  \"projectId\": \"test-project\",\n  \"model\": \"anthropic/claude-sonnet-4\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/agent/sdk/run-sync",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "agent", "sdk", "run-sync"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Conversations",
+      "item": [
+        {
+          "name": "List Conversations",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/agent/conversations?limit=20",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "agent", "conversations"],
+              "query": [
+                {
+                  "key": "limit",
+                  "value": "20"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Get Conversation Messages",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/agent/conversations/:conversationId/messages",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "agent", "conversations", ":conversationId", "messages"],
+              "variable": [
+                {
+                  "key": "conversationId",
+                  "value": "YOUR_CONVERSATION_ID"
+                }
+              ]
+            }
+          }
+        }
+      ]
+    }
+  ]
+}
