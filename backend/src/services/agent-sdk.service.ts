@@ -1,11 +1,16 @@
-import { query } from '@anthropic-ai/claude-agent-sdk';
+import Anthropic from '@anthropic-ai/sdk';
 import { Response } from 'express';
 import { config } from 'dotenv';
 import logger from '../utils/logger';
-import { agentSdkConfig } from '../config/agent-sdk';
-import { openRouterConfig } from '../config/openrouter';
+import { openRouterConfig, getModelPricing } from '../config/openrouter';
 
 config();
+
+// Initialize Anthropic client with OpenRouter
+const client = new Anthropic({
+  baseURL: openRouterConfig.baseUrl,
+  apiKey: openRouterConfig.authToken,
+});
 
 export interface SdkOptions {
   // Core options
@@ -26,27 +31,10 @@ export interface SdkOptions {
 
   // Execution control
   maxTurns?: number;
-  addDirs?: string[];
-
-  // Agents/Subagents
-  agents?: Record<string, {
-    description: string;
-    prompt: string;
-    tools?: string[];
-    model?: 'sonnet' | 'opus' | 'haiku';
-  }>;
-  agent?: string;
-
-  // MCP (Model Context Protocol)
-  mcpServers?: Record<string, {
-    command: string;
-    args?: string[];
-    env?: Record<string, string>;
-  }>;
+  maxTokens?: number;
 
   // Advanced
   verbose?: boolean;
-  dangerouslySkipPermissions?: boolean;
 }
 
 export interface SdkResult {
@@ -58,8 +46,18 @@ export interface SdkResult {
   costUsd?: number;
 }
 
+// Store conversation history for sessions
+const conversationHistory: Map<string, Anthropic.MessageParam[]> = new Map();
+
 /**
- * Run Agent SDK with streaming output (SSE)
+ * Generate a unique session ID
+ */
+const generateSessionId = (): string => {
+  return `session-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
+};
+
+/**
+ * Run with streaming output (SSE)
  */
 export const runSdkStreaming = async (
   prompt: string,
@@ -73,159 +71,194 @@ export const runSdkStreaming = async (
   res.setHeader('Connection', 'keep-alive');
   res.setHeader('X-Accel-Buffering', 'no');
 
-  let sessionId: string | undefined;
   let aborted = false;
+  const sessionId = options.resume || generateSessionId();
+  let tokensInput = 0;
+  let tokensOutput = 0;
 
   // Handle client disconnect
   res.on('close', () => {
     aborted = true;
-    logger.info('Client disconnected from SDK stream');
+    logger.info('Client disconnected from stream');
   });
 
   try {
-    logger.info('Running Agent SDK (streaming)', {
+    const model = options.model || openRouterConfig.defaultModel;
+    const maxTokens = options.maxTokens || 8192;
+
+    logger.info('Running Claude API (streaming)', {
       workspacePath,
-      model: options.model || openRouterConfig.defaultModel,
+      model,
+      sessionId,
     });
 
-    // Build effective system prompt
-    const effectiveSystemPrompt = options.systemPrompt || options.appendSystemPrompt;
-
-    const response = query({
-      prompt,
-      options: {
-        allowedTools: options.allowedTools || agentSdkConfig.defaultAllowedTools,
-        permissionMode: options.permissionMode || agentSdkConfig.defaultPermissionMode,
-        model: options.model || openRouterConfig.defaultModel,
-        systemPrompt: effectiveSystemPrompt,
-        resume: options.resume,
-        maxTurns: options.maxTurns,
-      },
-    });
-
-    for await (const message of response) {
-      if (aborted) break;
-
-      // Extract session ID from init message
-      if (message.type === 'system' && (message as { subtype?: string }).subtype === 'init') {
-        sessionId = (message as { session_id?: string }).session_id;
-        logger.info('SDK session started', { sessionId });
-      }
-
-      // Send message to client
-      res.write(`data: ${JSON.stringify(message)}\n\n`);
-
-      // Handle text content
-      if (message.type === 'assistant' && (message as { message?: { content?: Array<{ text?: string }> } }).message?.content) {
-        const content = (message as { message: { content: Array<{ text?: string; name?: string }> } }).message.content;
-        for (const block of content) {
-          if ('text' in block && block.text) {
-            res.write(`data: ${JSON.stringify({
-              type: 'text',
-              content: block.text,
-            })}\n\n`);
-          } else if ('name' in block && block.name) {
-            res.write(`data: ${JSON.stringify({
-              type: 'tool_use',
-              tool_name: block.name,
-            })}\n\n`);
-          }
-        }
-      }
+    // Get or create conversation history
+    let messages: Anthropic.MessageParam[] = [];
+    if (options.resume && conversationHistory.has(options.resume)) {
+      messages = [...conversationHistory.get(options.resume)!];
     }
+
+    // Add new user message
+    messages.push({ role: 'user', content: prompt });
+
+    // Send init message
+    res.write(`data: ${JSON.stringify({
+      type: 'system',
+      subtype: 'init',
+      session_id: sessionId,
+    })}\n\n`);
+
+    // Build system prompt
+    const systemPrompt = options.systemPrompt || options.appendSystemPrompt ||
+      `You are Claude, an AI assistant. You are helpful, harmless, and honest. Current working directory: ${workspacePath}`;
+
+    // Create streaming message
+    const stream = client.messages.stream({
+      model,
+      max_tokens: maxTokens,
+      system: systemPrompt,
+      messages,
+    });
+
+    let fullResponse = '';
+
+    // Handle stream events
+    stream.on('text', (text) => {
+      if (aborted) return;
+      fullResponse += text;
+      res.write(`data: ${JSON.stringify({
+        type: 'text',
+        content: text,
+      })}\n\n`);
+    });
+
+    stream.on('message', (message) => {
+      tokensInput = message.usage.input_tokens;
+      tokensOutput = message.usage.output_tokens;
+    });
+
+    stream.on('error', (error) => {
+      logger.error('Stream error', { error: error.message });
+      if (!aborted) {
+        res.write(`data: ${JSON.stringify({
+          type: 'error',
+          content: error.message,
+        })}\n\n`);
+      }
+    });
+
+    // Wait for stream to complete
+    await stream.finalMessage();
+
+    // Update conversation history
+    messages.push({ role: 'assistant', content: fullResponse });
+    conversationHistory.set(sessionId, messages);
+
+    // Calculate cost
+    const pricing = getModelPricing(model);
+    const costUsd = (tokensInput / 1_000_000) * pricing.input +
+                    (tokensOutput / 1_000_000) * pricing.output;
+
+    // Send completion message
+    res.write(`data: ${JSON.stringify({
+      type: 'usage',
+      tokensInput,
+      tokensOutput,
+      costUsd,
+    })}\n\n`);
 
     res.write(`data: ${JSON.stringify({
       type: 'done',
       sessionId,
+      model,
+      tokensInput,
+      tokensOutput,
+      costUsd,
     })}\n\n`);
-  } catch (error) {
-    logger.error('Agent SDK streaming error', { error: (error as Error).message });
 
-    res.write(`data: ${JSON.stringify({
-      type: 'error',
-      content: (error as Error).message,
-    })}\n\n`);
+    logger.info('Claude API streaming completed', {
+      sessionId,
+      model,
+      tokensInput,
+      tokensOutput,
+      costUsd,
+    });
+
+  } catch (error) {
+    logger.error('Claude API streaming error', { error: (error as Error).message });
+
+    if (!aborted) {
+      res.write(`data: ${JSON.stringify({
+        type: 'error',
+        content: (error as Error).message,
+      })}\n\n`);
+    }
   } finally {
     res.end();
   }
 };
 
 /**
- * Run Agent SDK and collect all results (JSON)
+ * Run and collect all results (JSON)
  */
 export const runSdkSync = async (
   prompt: string,
   workspacePath: string,
   options: SdkOptions = {}
 ): Promise<SdkResult> => {
-  let sessionId: string | undefined;
-  let outputParts: string[] = [];
-  let tokensInput = 0;
-  let tokensOutput = 0;
+  const sessionId = options.resume || generateSessionId();
 
   try {
-    logger.info('Running Agent SDK (sync)', {
+    const model = options.model || openRouterConfig.defaultModel;
+    const maxTokens = options.maxTokens || 8192;
+
+    logger.info('Running Claude API (sync)', {
       workspacePath,
-      model: options.model || openRouterConfig.defaultModel,
+      model,
+      sessionId,
     });
 
-    // Build effective system prompt
-    const effectiveSystemPrompt = options.systemPrompt || options.appendSystemPrompt;
-
-    const response = query({
-      prompt,
-      options: {
-        allowedTools: options.allowedTools || agentSdkConfig.defaultAllowedTools,
-        permissionMode: options.permissionMode || agentSdkConfig.defaultPermissionMode,
-        model: options.model || openRouterConfig.defaultModel,
-        systemPrompt: effectiveSystemPrompt,
-        resume: options.resume,
-        maxTurns: options.maxTurns,
-      },
-    });
-
-    for await (const message of response) {
-      // Extract session ID
-      if (message.type === 'system' && (message as { subtype?: string }).subtype === 'init') {
-        sessionId = (message as { session_id?: string }).session_id;
-      }
-
-      // Collect text output
-      if (message.type === 'assistant') {
-        const content = (message as { message?: { content?: Array<{ text?: string }> } }).message?.content;
-        if (content) {
-          for (const block of content) {
-            if ('text' in block && block.text) {
-              outputParts.push(block.text);
-            }
-          }
-        }
-
-        // Collect token usage if available
-        const usage = (message as { usage?: { input_tokens?: number; output_tokens?: number } }).usage;
-        if (usage) {
-          tokensInput += usage.input_tokens || 0;
-          tokensOutput += usage.output_tokens || 0;
-        }
-      }
-
-      // Check for result
-      if (message.type === 'result') {
-        const result = (message as { result?: string }).result;
-        if (result) {
-          outputParts.push(result);
-        }
-      }
+    // Get or create conversation history
+    let messages: Anthropic.MessageParam[] = [];
+    if (options.resume && conversationHistory.has(options.resume)) {
+      messages = [...conversationHistory.get(options.resume)!];
     }
 
-    // Calculate cost
-    const pricing = openRouterConfig.modelCapabilities[
-      (options.model || openRouterConfig.defaultModel) as keyof typeof openRouterConfig.modelCapabilities
-    ]?.pricing || { input: 3.0, output: 15.0 };
-    const costUsd = (tokensInput / 1_000_000) * pricing.input + (tokensOutput / 1_000_000) * pricing.output;
+    // Add new user message
+    messages.push({ role: 'user', content: prompt });
 
-    logger.info('Agent SDK completed', {
+    // Build system prompt
+    const systemPrompt = options.systemPrompt || options.appendSystemPrompt ||
+      `You are Claude, an AI assistant. You are helpful, harmless, and honest. Current working directory: ${workspacePath}`;
+
+    // Create message
+    const response = await client.messages.create({
+      model,
+      max_tokens: maxTokens,
+      system: systemPrompt,
+      messages,
+    });
+
+    // Extract text from response
+    const output = response.content
+      .filter((block): block is Anthropic.TextBlock => block.type === 'text')
+      .map((block) => block.text)
+      .join('\n');
+
+    // Update conversation history
+    messages.push({ role: 'assistant', content: output });
+    conversationHistory.set(sessionId, messages);
+
+    // Calculate cost
+    const tokensInput = response.usage.input_tokens;
+    const tokensOutput = response.usage.output_tokens;
+    const pricing = getModelPricing(model);
+    const costUsd = (tokensInput / 1_000_000) * pricing.input +
+                    (tokensOutput / 1_000_000) * pricing.output;
+
+    logger.info('Claude API sync completed', {
       sessionId,
+      model,
       tokensInput,
       tokensOutput,
       costUsd,
@@ -233,14 +266,15 @@ export const runSdkSync = async (
 
     return {
       success: true,
-      output: outputParts.join('\n'),
+      output,
       sessionId,
       tokensInput,
       tokensOutput,
       costUsd,
     };
+
   } catch (error) {
-    logger.error('Agent SDK sync error', { error: (error as Error).message });
+    logger.error('Claude API sync error', { error: (error as Error).message });
 
     return {
       success: false,
@@ -265,8 +299,24 @@ export const resumeSession = async (
   });
 };
 
+/**
+ * Clear session history
+ */
+export const clearSession = (sessionId: string): boolean => {
+  return conversationHistory.delete(sessionId);
+};
+
+/**
+ * Get session history
+ */
+export const getSessionHistory = (sessionId: string): Anthropic.MessageParam[] | undefined => {
+  return conversationHistory.get(sessionId);
+};
+
 export default {
   runSdkStreaming,
   runSdkSync,
   resumeSession,
+  clearSession,
+  getSessionHistory,
 };
