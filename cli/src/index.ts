@@ -242,6 +242,14 @@ authCmd
   });
 
 authCmd
+  .command('set-token <token>')
+  .description('Set authentication token directly')
+  .action((token: string) => {
+    config.set('token', token);
+    console.log(chalk.green('Token set successfully'));
+  });
+
+authCmd
   .command('logout')
   .description('Clear authentication token')
   .action(() => {
