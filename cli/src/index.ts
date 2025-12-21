@@ -3,12 +3,30 @@
 import { Command } from 'commander';
 import chalk from 'chalk';
 import Conf from 'conf';
-import fetch from 'node-fetch';
+import fetch, { Response as FetchResponse } from 'node-fetch';
 import ora from 'ora';
 import inquirer from 'inquirer';
 
 const config = new Conf({ projectName: 'openanalyst' });
 const program = new Command();
+
+// Type definitions
+interface ApiResponse {
+  success: boolean;
+  data?: Record<string, unknown>;
+  error?: { code: string; message: string };
+}
+
+interface StreamMessage {
+  type: string;
+  content?: string;
+  tool_name?: string;
+  exitCode?: number;
+  tokensInput?: number;
+  tokensOutput?: number;
+  costUsd?: number;
+  sessionId?: string;
+}
 
 // Helper to get API URL
 const getApiUrl = (): string => {
@@ -34,7 +52,7 @@ const getToken = (): string => {
 const apiRequest = async (
   endpoint: string,
   options: { method?: string; body?: object; stream?: boolean } = {}
-) => {
+): Promise<FetchResponse | ApiResponse> => {
   const url = `${getApiUrl()}${endpoint}`;
   const token = getToken();
 
@@ -48,10 +66,64 @@ const apiRequest = async (
   });
 
   if (!options.stream) {
-    return response.json();
+    const data = await response.json() as ApiResponse;
+    return data;
+  }
+
+  // For streaming, check for errors first
+  if (!response.ok) {
+    try {
+      const errorData = await response.json() as ApiResponse;
+      throw new Error(errorData.error?.message || `HTTP ${response.status}`);
+    } catch {
+      throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+    }
   }
 
   return response;
+};
+
+// Process SSE stream
+const processStream = async (
+  response: FetchResponse,
+  onMessage: (msg: StreamMessage) => void,
+  onError?: (err: Error) => void
+): Promise<void> => {
+  return new Promise((resolve, reject) => {
+    const body = response.body;
+    if (!body) {
+      reject(new Error('No response body'));
+      return;
+    }
+
+    let buffer = '';
+
+    body.on('data', (chunk: Buffer) => {
+      buffer += chunk.toString();
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+
+      for (const line of lines) {
+        if (line.startsWith('data: ')) {
+          try {
+            const data = JSON.parse(line.slice(6)) as StreamMessage;
+            onMessage(data);
+          } catch {
+            // Ignore parse errors for incomplete messages
+          }
+        }
+      }
+    });
+
+    body.on('end', () => {
+      resolve();
+    });
+
+    body.on('error', (err: Error) => {
+      if (onError) onError(err);
+      reject(err);
+    });
+  });
 };
 
 program
@@ -815,14 +887,49 @@ program
         console.log(chalk.cyan('│') + chalk.bold('           Tool Permissions             ') + chalk.cyan('│'));
         console.log(chalk.cyan('╰─────────────────────────────────────────╯\n'));
 
-        console.log(chalk.bold('  Permission Mode:') + ` ${chalk.cyan(permissionMode)}`);
+        console.log(chalk.bold('  Current Mode:') + ` ${chalk.cyan(permissionMode)}`);
         console.log('');
-        console.log(chalk.bold('  Available Modes:'));
-        console.log(`    ${chalk.cyan('default')}           - Prompt for risky operations`);
-        console.log(`    ${chalk.cyan('plan')}              - Plan mode, no execution`);
-        console.log(`    ${chalk.cyan('acceptEdits')}       - Auto-accept file edits`);
-        console.log(`    ${chalk.cyan('bypassPermissions')} - Skip all prompts (dangerous)`);
+
+        // Arrow key selection for permission mode
+        const { selectedMode } = await inquirer.prompt([{
+          type: 'list',
+          name: 'selectedMode',
+          message: 'Select permission mode:',
+          choices: [
+            {
+              name: `${permissionMode === 'default' ? chalk.green('●') : '○'} default           ${chalk.gray('- Prompt for risky operations')}`,
+              value: 'default',
+            },
+            {
+              name: `${permissionMode === 'plan' ? chalk.green('●') : '○'} plan              ${chalk.gray('- Plan mode, no execution')}`,
+              value: 'plan',
+            },
+            {
+              name: `${permissionMode === 'acceptEdits' ? chalk.green('●') : '○'} acceptEdits       ${chalk.gray('- Auto-accept file edits')}`,
+              value: 'acceptEdits',
+            },
+            {
+              name: `${permissionMode === 'bypassPermissions' ? chalk.green('●') : '○'} bypassPermissions ${chalk.yellow('- Skip all prompts (dangerous)')}`,
+              value: 'bypassPermissions',
+            },
+            {
+              name: chalk.gray('  [Keep current]'),
+              value: permissionMode,
+            },
+          ],
+          default: permissionMode,
+          loop: false,
+        }]);
+
+        if (selectedMode !== permissionMode) {
+          permissionMode = selectedMode;
+          console.log(chalk.green(`\n  Permission mode set to: ${permissionMode}`));
+          if (permissionMode === 'bypassPermissions') {
+            console.log(chalk.yellow('  ⚠️  Warning: All permission prompts will be skipped!'));
+          }
+        }
         console.log('');
+
         console.log(chalk.bold('  Allowed Tools:'));
         if (currentTools.length > 0) {
           for (const tool of currentTools) {
@@ -834,8 +941,6 @@ program
             console.log(`    ${isDisallowed ? chalk.red('✗') : chalk.green('✓')} ${tool}`);
           }
         }
-        console.log('');
-        console.log(chalk.gray('  Use /permissions <mode> to change permission mode'));
         console.log('');
         continue;
       }
@@ -1067,7 +1172,60 @@ program
         continue;
       }
 
-      // Model command
+      // Model command - with arrow key selection
+      if (input === '/model') {
+        console.log(chalk.cyan('\n╭─────────────────────────────────────────╮'));
+        console.log(chalk.cyan('│') + chalk.bold('           Select Model                 ') + chalk.cyan('│'));
+        console.log(chalk.cyan('╰─────────────────────────────────────────╯\n'));
+
+        console.log(chalk.bold('  Current Model:') + ` ${chalk.cyan(currentModel || 'default')}`);
+        console.log('');
+
+        const { selectedModel } = await inquirer.prompt([{
+          type: 'list',
+          name: 'selectedModel',
+          message: 'Select model:',
+          choices: [
+            {
+              name: `${chalk.cyan('●')} anthropic/claude-sonnet-4     ${chalk.gray('- Balanced (recommended)')}`,
+              value: 'anthropic/claude-sonnet-4',
+            },
+            {
+              name: `${chalk.magenta('●')} anthropic/claude-opus-4      ${chalk.gray('- Most capable')}`,
+              value: 'anthropic/claude-opus-4',
+            },
+            {
+              name: `${chalk.green('●')} anthropic/claude-haiku-4     ${chalk.gray('- Fastest, lowest cost')}`,
+              value: 'anthropic/claude-haiku-4',
+            },
+            {
+              name: `${chalk.yellow('●')} anthropic/claude-sonnet-4.5  ${chalk.gray('- Latest Sonnet')}`,
+              value: 'anthropic/claude-sonnet-4.5',
+            },
+            {
+              name: chalk.gray('  [Enter custom model...]'),
+              value: '__custom__',
+            },
+          ],
+          default: currentModel || 'anthropic/claude-sonnet-4',
+          loop: false,
+        }]);
+
+        if (selectedModel === '__custom__') {
+          const { customModel } = await inquirer.prompt([{
+            type: 'input',
+            name: 'customModel',
+            message: 'Enter model name:',
+            default: currentModel || 'anthropic/claude-sonnet-4',
+          }]);
+          currentModel = customModel;
+        } else {
+          currentModel = selectedModel;
+        }
+        console.log(chalk.green(`\n  Model set to: ${currentModel}\n`));
+        continue;
+      }
+
       if (input.startsWith('/model ')) {
         const newModel = input.slice(7).trim();
         if (newModel) {
@@ -1148,53 +1306,62 @@ program
       if (Object.keys(customAgents).length > 0) requestBody.agents = customAgents;
       if (Object.keys(mcpServers).length > 0) requestBody.mcpServers = mcpServers;
 
+      const spinner = ora({
+        text: chalk.cyan('Thinking...'),
+        spinner: 'dots',
+      }).start();
+
       try {
         const response = await apiRequest(endpoint, {
           method: 'POST',
           body: requestBody,
           stream: true,
-        }) as { body: NodeJS.ReadableStream };
+        });
 
-        process.stdout.write('\n');
+        // Check if it's a FetchResponse (streaming) or ApiResponse (error)
+        if ('body' in response && response.body) {
+          spinner.stop();
+          process.stdout.write('\n');
 
-        const reader = response.body;
-        let buffer = '';
+          await processStream(response as FetchResponse, (msg: StreamMessage) => {
+            // Handle different message types
+            handleStreamMessage(msg);
 
-        await new Promise<void>((resolve) => {
-          reader.on('data', (chunk: Buffer) => {
-            buffer += chunk.toString();
-            const lines = buffer.split('\n');
-            buffer = lines.pop() || '';
-
-            for (const line of lines) {
-              if (line.startsWith('data: ')) {
-                try {
-                  const data = JSON.parse(line.slice(6));
-                  handleStreamMessage(data);
-
-                  // Update session stats from usage data
-                  if (data.type === 'usage' && data.tokensInput) {
-                    sessionStats.tokensInput += data.tokensInput || 0;
-                    sessionStats.tokensOutput += data.tokensOutput || 0;
-                    sessionStats.costUsd += data.costUsd || 0;
-                  }
-                  if (data.type === 'done') {
-                    sessionStats.messages++;
-                  }
-                } catch {
-                  // Ignore
-                }
-              }
+            // Update session stats from usage data
+            if (msg.type === 'usage' && msg.tokensInput) {
+              sessionStats.tokensInput += msg.tokensInput || 0;
+              sessionStats.tokensOutput += msg.tokensOutput || 0;
+              sessionStats.costUsd += msg.costUsd || 0;
+            }
+            if (msg.type === 'done') {
+              sessionStats.messages++;
             }
           });
 
-          reader.on('end', () => {
-            console.log('\n');
-            resolve();
-          });
-        });
+          console.log('\n');
+        } else {
+          // It's a JSON response (likely an error)
+          spinner.stop();
+          const jsonResponse = response as ApiResponse;
+          if (!jsonResponse.success) {
+            console.error(chalk.red(`\nError: ${jsonResponse.error?.message || 'Unknown error'}\n`));
+          } else if (jsonResponse.data) {
+            console.log(chalk.cyan('\nResponse:'));
+            console.log(JSON.stringify(jsonResponse.data, null, 2));
+            console.log('');
+          }
+        }
       } catch (error) {
-        console.error(chalk.red((error as Error).message));
+        spinner.stop();
+        console.error(chalk.red(`\nError: ${(error as Error).message}\n`));
+
+        // Provide helpful suggestions
+        if ((error as Error).message.includes('ECONNREFUSED')) {
+          console.log(chalk.yellow('  Tip: Check if the API server is running'));
+          console.log(chalk.gray(`  API URL: ${config.get('apiUrl')}`));
+        } else if ((error as Error).message.includes('401') || (error as Error).message.includes('Unauthorized')) {
+          console.log(chalk.yellow('  Tip: Try re-authenticating with: openanalyst auth login'));
+        }
       }
 
       lastWasContinue = false;
