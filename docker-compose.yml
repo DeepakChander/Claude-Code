@@ -123,7 +123,7 @@ services:
       context: ./backend
       dockerfile: Dockerfile
     container_name: openanalyst-kafka-worker
-    command: ["node", "dist/services/kafka-consumer.service.js"]
+    command: ["node", "dist/worker.js"]
     environment:
       - NODE_ENV=production
       - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
