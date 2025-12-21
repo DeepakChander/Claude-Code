@@ -10,6 +10,10 @@ import {
   continueAgentSdkSync,
   getConversationMessages,
   listConversations,
+  listResumableConversations,
+  resumeConversationById,
+  resumeConversationByIdSync,
+  getConversationDetails,
   getUsage,
   agentHealth,
   compactConversation,
@@ -89,11 +93,39 @@ router.post('/sdk/continue-sync', continueAgentSdkSync);
 router.get('/conversations', listConversations);
 
 /**
+ * @route   GET /api/agent/resumable
+ * @desc    List all resumable conversations (those with sessionId)
+ * @access  Private
+ */
+router.get('/resumable', listResumableConversations);
+
+/**
+ * @route   GET /api/agent/conversations/:conversationId
+ * @desc    Get conversation details including session info
+ * @access  Private
+ */
+router.get('/conversations/:conversationId', getConversationDetails);
+
+/**
  * @route   GET /api/agent/conversations/:conversationId/messages
  * @desc    Get all messages for a conversation
  * @access  Private
  */
 router.get('/conversations/:conversationId/messages', getConversationMessages);
+
+/**
+ * @route   POST /api/agent/resume/:conversationId
+ * @desc    Resume a conversation by ID (SSE streaming)
+ * @access  Private
+ */
+router.post('/resume/:conversationId', resumeConversationById);
+
+/**
+ * @route   POST /api/agent/resume/:conversationId/sync
+ * @desc    Resume a conversation by ID (JSON response)
+ * @access  Private
+ */
+router.post('/resume/:conversationId/sync', resumeConversationByIdSync);
 
 /**
  * Utility endpoints

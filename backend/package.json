@@ -1,7 +1,7 @@
 {
   "name": "claude-agent-api",
-  "version": "1.0.0",
-  "description": "Claude Code API Service with Agent SDK",
+  "version": "2.0.0",
+  "description": "Claude Code API Service with Agent SDK, MongoDB, and Kafka",
   "main": "dist/app.js",
   "directories": {
     "test": "tests"
@@ -11,13 +11,11 @@
     "dev": "nodemon --exec ts-node src/app.ts",
     "build": "tsc",
     "start": "node dist/app.js",
+    "start:worker": "node dist/services/kafka-consumer.service.js",
     "test:watch": "jest --watch",
     "lint": "eslint . --ext .ts",
     "lint:fix": "eslint . --ext .ts --fix",
-    "format": "prettier --write \"src/**/*.ts\"",
-    "migrate:create": "node-pg-migrate create --migration-file-language ts --migrations-dir ../database/migrations",
-    "migrate:up": "node-pg-migrate up --migrations-dir ../database/migrations --database-url-var DATABASE_URL",
-    "migrate:down": "node-pg-migrate down --migrations-dir ../database/migrations --database-url-var DATABASE_URL"
+    "format": "prettier --write \"src/**/*.ts\""
   },
   "keywords": [],
   "author": "",
@@ -26,7 +24,6 @@
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.1.74",
     "@anthropic-ai/sdk": "^0.71.2",
-    "@supabase/supabase-js": "^2.89.0",
     "bcrypt": "^6.0.0",
     "compression": "^1.8.1",
     "cors": "^2.8.5",
@@ -38,10 +35,9 @@
     "helmet": "^8.1.0",
     "joi": "^18.0.2",
     "jsonwebtoken": "^9.0.3",
+    "kafkajs": "^2.2.4",
+    "mongoose": "^8.15.1",
     "morgan": "^1.10.1",
-    "node-pg-migrate": "^8.0.4",
-    "pg": "^8.16.3",
-    "pg-hstore": "^2.3.4",
     "uuid": "^13.0.0",
     "winston": "^3.19.0",
     "winston-daily-rotate-file": "^5.0.0"
@@ -55,7 +51,6 @@
     "@types/jsonwebtoken": "^9.0.10",
     "@types/morgan": "^1.9.10",
     "@types/node": "^25.0.3",
-    "@types/pg": "^8.16.0",
     "@types/supertest": "^6.0.3",
     "@types/uuid": "^10.0.0",
     "@typescript-eslint/eslint-plugin": "^8.50.0",

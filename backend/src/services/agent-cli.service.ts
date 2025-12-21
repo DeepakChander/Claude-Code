@@ -427,10 +427,92 @@ export const killProcess = (process: ChildProcess): void => {
   }
 };
 
+/**
+ * Execute Claude prompt and return parsed result (for Kafka worker)
+ */
+export const executeClaudePrompt = async (
+  prompt: string,
+  options: {
+    model?: string;
+    workingDirectory?: string;
+    resume?: string;
+    continue?: boolean;
+    sessionId?: string;
+    allowedTools?: string[];
+  } = {}
+): Promise<{
+  content: string;
+  sessionId?: string;
+  tokensInput: number;
+  tokensOutput: number;
+}> => {
+  const workspacePath = options.workingDirectory || process.cwd();
+
+  const cliOptions: CliOptions = {
+    model: options.model,
+    resume: options.resume,
+    continue: options.continue,
+    sessionId: options.sessionId,
+    allowedTools: options.allowedTools,
+    outputFormat: 'json',
+  };
+
+  const result = await runCliSync(prompt, workspacePath, cliOptions);
+
+  if (!result.success) {
+    throw new Error(result.output);
+  }
+
+  // Parse the JSON output
+  let parsedOutput: {
+    result?: string;
+    content?: string;
+    usage?: { input_tokens?: number; output_tokens?: number };
+    session_id?: string;
+  } = {};
+
+  try {
+    parsedOutput = JSON.parse(result.output);
+  } catch {
+    // If not JSON, treat output as plain text
+    parsedOutput = { content: result.output };
+  }
+
+  return {
+    content: parsedOutput.result || parsedOutput.content || result.output,
+    sessionId: result.sessionId || parsedOutput.session_id,
+    tokensInput: parsedOutput.usage?.input_tokens || 0,
+    tokensOutput: parsedOutput.usage?.output_tokens || 0,
+  };
+};
+
+/**
+ * Resume a conversation by ID and execute a prompt
+ */
+export const resumeConversation = async (
+  sessionId: string,
+  prompt: string,
+  workspacePath: string,
+  options: CliOptions = {}
+): Promise<{
+  content: string;
+  sessionId?: string;
+  tokensInput: number;
+  tokensOutput: number;
+}> => {
+  return executeClaudePrompt(prompt, {
+    ...options,
+    resume: sessionId,
+    workingDirectory: workspacePath,
+  });
+};
+
 export default {
   runCliStreaming,
   runCliSync,
   continueConversation,
   resumeSession,
   killProcess,
+  executeClaudePrompt,
+  resumeConversation,
 };

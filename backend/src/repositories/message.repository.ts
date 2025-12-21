@@ -1,5 +1,5 @@
-import { pool } from '../config/database';
-import { Message, MessageCreateInput, ToolCall, ToolResult } from '../types';
+import { Message, IMessage, IToolCall, IToolResult } from '../models';
+import { MessageCreateInput, ToolCall, ToolResult } from '../types';
 import { generateUUID } from '../utils/helpers';
 import logger from '../utils/logger';
 
@@ -14,43 +14,36 @@ export const create = async (
     tokensOutput?: number;
     model?: string;
     costUsd?: number;
-    latencyMs?: number;
+    correlationId?: string;
   }
-): Promise<Message> => {
-  const messageId = generateUUID();
-  const now = new Date();
-
-  const query = `
-    INSERT INTO messages (
-      message_id, conversation_id, parent_message_id, role, content,
-      content_type, tool_calls, tokens_input, tokens_output,
-      model_used, cost_usd, latency_ms, is_error, created_at, metadata
-    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
-    RETURNING *
-  `;
-
-  const values = [
-    messageId,
-    conversationId,
-    input.parent_message_id || null,
-    input.role,
-    input.content,
-    input.content_type || 'text',
-    input.toolCalls ? JSON.stringify(input.toolCalls) : null,
-    input.tokensInput || null,
-    input.tokensOutput || null,
-    input.model || null,
-    input.costUsd || null,
-    input.latencyMs || null,
-    false,
-    now,
-    input.metadata || {},
-  ];
-
+): Promise<IMessage> => {
   try {
-    const result = await pool.query(query, values);
-    logger.info('Message created', { messageId, conversationId, role: input.role });
-    return result.rows[0];
+    // Convert ToolCall format to IToolCall format
+    const toolCalls: IToolCall[] = input.toolCalls?.map(tc => ({
+      id: tc.tool_use_id,
+      type: 'function',
+      function: {
+        name: tc.tool_name,
+        arguments: JSON.stringify(tc.tool_input),
+      },
+    })) || [];
+
+    const message = new Message({
+      messageId: generateUUID(),
+      conversationId,
+      role: input.role,
+      content: input.content,
+      tokensInput: input.tokensInput || 0,
+      tokensOutput: input.tokensOutput || 0,
+      modelUsed: input.model || 'anthropic/claude-sonnet-4',
+      costUsd: input.costUsd || 0,
+      toolCalls,
+      correlationId: input.correlationId || '',
+    });
+
+    await message.save();
+    logger.info('Message created', { messageId: message.messageId, conversationId, role: input.role });
+    return message;
   } catch (error) {
     logger.error('Failed to create message', { conversationId, error });
     throw error;
@@ -60,14 +53,23 @@ export const create = async (
 /**
  * Find message by ID
  */
-export const findById = async (messageId: string): Promise<Message | null> => {
-  const query = 'SELECT * FROM messages WHERE message_id = $1';
-
+export const findById = async (messageId: string): Promise<IMessage | null> => {
   try {
-    const result = await pool.query(query, [messageId]);
-    return result.rows[0] || null;
+    return await Message.findOne({ messageId });
   } catch (error) {
     logger.error('Failed to find message', { messageId, error });
+    throw error;
+  }
+};
+
+/**
+ * Find message by correlation ID
+ */
+export const findByCorrelationId = async (correlationId: string): Promise<IMessage | null> => {
+  try {
+    return await Message.findOne({ correlationId });
+  } catch (error) {
+    logger.error('Failed to find message by correlation ID', { correlationId, error });
     throw error;
   }
 };
@@ -78,19 +80,14 @@ export const findById = async (messageId: string): Promise<Message | null> => {
 export const findByConversation = async (
   conversationId: string,
   options: { limit?: number; offset?: number; order?: 'asc' | 'desc' } = {}
-): Promise<Message[]> => {
+): Promise<IMessage[]> => {
   const { limit = 100, offset = 0, order = 'asc' } = options;
 
-  const query = `
-    SELECT * FROM messages
-    WHERE conversation_id = $1
-    ORDER BY created_at ${order === 'asc' ? 'ASC' : 'DESC'}
-    LIMIT $2 OFFSET $3
-  `;
-
   try {
-    const result = await pool.query(query, [conversationId, limit, offset]);
-    return result.rows;
+    return await Message.find({ conversationId })
+      .sort({ createdAt: order === 'asc' ? 1 : -1 })
+      .skip(offset)
+      .limit(limit);
   } catch (error) {
     logger.error('Failed to find messages', { conversationId, error });
     throw error;
@@ -103,20 +100,14 @@ export const findByConversation = async (
 export const getLastMessages = async (
   conversationId: string,
   count: number = 10
-): Promise<Message[]> => {
-  const query = `
-    SELECT * FROM (
-      SELECT * FROM messages
-      WHERE conversation_id = $1
-      ORDER BY created_at DESC
-      LIMIT $2
-    ) sub
-    ORDER BY created_at ASC
-  `;
-
+): Promise<IMessage[]> => {
   try {
-    const result = await pool.query(query, [conversationId, count]);
-    return result.rows;
+    const messages = await Message.find({ conversationId })
+      .sort({ createdAt: -1 })
+      .limit(count);
+
+    // Reverse to get chronological order
+    return messages.reverse();
   } catch (error) {
     logger.error('Failed to get last messages', { conversationId, error });
     throw error;
@@ -129,42 +120,23 @@ export const getLastMessages = async (
 export const updateToolResults = async (
   messageId: string,
   toolResults: ToolResult[]
-): Promise<Message | null> => {
-  const query = `
-    UPDATE messages
-    SET tool_results = $1
-    WHERE message_id = $2
-    RETURNING *
-  `;
-
+): Promise<IMessage | null> => {
   try {
-    const result = await pool.query(query, [JSON.stringify(toolResults), messageId]);
-    return result.rows[0] || null;
+    // Convert ToolResult format to IToolResult format
+    const results: IToolResult[] = toolResults.map(tr => ({
+      toolCallId: tr.tool_use_id,
+      result: tr.output,
+      isError: tr.is_error,
+    }));
+
+    const message = await Message.findOneAndUpdate(
+      { messageId },
+      { $set: { toolResults: results } },
+      { new: true }
+    );
+    return message;
   } catch (error) {
     logger.error('Failed to update tool results', { messageId, error });
-    throw error;
-  }
-};
-
-/**
- * Mark message as error
- */
-export const markAsError = async (
-  messageId: string,
-  errorMessage: string
-): Promise<Message | null> => {
-  const query = `
-    UPDATE messages
-    SET is_error = true, error_message = $1
-    WHERE message_id = $2
-    RETURNING *
-  `;
-
-  try {
-    const result = await pool.query(query, [errorMessage, messageId]);
-    return result.rows[0] || null;
-  } catch (error) {
-    logger.error('Failed to mark message as error', { messageId, error });
     throw error;
   }
 };
@@ -173,11 +145,8 @@ export const markAsError = async (
  * Count messages in a conversation
  */
 export const countByConversation = async (conversationId: string): Promise<number> => {
-  const query = 'SELECT COUNT(*) FROM messages WHERE conversation_id = $1';
-
   try {
-    const result = await pool.query(query, [conversationId]);
-    return parseInt(result.rows[0].count, 10);
+    return await Message.countDocuments({ conversationId });
   } catch (error) {
     logger.error('Failed to count messages', { conversationId, error });
     throw error;
@@ -188,11 +157,9 @@ export const countByConversation = async (conversationId: string): Promise<numbe
  * Delete all messages in a conversation
  */
 export const deleteByConversation = async (conversationId: string): Promise<number> => {
-  const query = 'DELETE FROM messages WHERE conversation_id = $1';
-
   try {
-    const result = await pool.query(query, [conversationId]);
-    return result.rowCount ?? 0;
+    const result = await Message.deleteMany({ conversationId });
+    return result.deletedCount;
   } catch (error) {
     logger.error('Failed to delete messages', { conversationId, error });
     throw error;
@@ -205,13 +172,12 @@ export const deleteByConversation = async (conversationId: string): Promise<numb
 export const createUserMessage = async (
   conversationId: string,
   content: string,
-  metadata?: Record<string, unknown>
-): Promise<Message> => {
+  correlationId?: string
+): Promise<IMessage> => {
   return create(conversationId, {
     role: 'user',
     content,
-    content_type: 'text',
-    metadata,
+    correlationId,
   });
 };
 
@@ -227,27 +193,39 @@ export const createAssistantMessage = async (
     tokensOutput?: number;
     model?: string;
     costUsd?: number;
-    latencyMs?: number;
-    metadata?: Record<string, unknown>;
+    correlationId?: string;
   } = {}
-): Promise<Message> => {
+): Promise<IMessage> => {
   return create(conversationId, {
     role: 'assistant',
     content,
-    content_type: 'text',
     ...options,
   });
+};
+
+/**
+ * Delete a single message
+ */
+export const deleteMessage = async (messageId: string): Promise<boolean> => {
+  try {
+    const result = await Message.deleteOne({ messageId });
+    return result.deletedCount > 0;
+  } catch (error) {
+    logger.error('Failed to delete message', { messageId, error });
+    throw error;
+  }
 };
 
 export default {
   create,
   findById,
+  findByCorrelationId,
   findByConversation,
   getLastMessages,
   updateToolResults,
-  markAsError,
   countByConversation,
   deleteByConversation,
   createUserMessage,
   createAssistantMessage,
+  delete: deleteMessage,
 };

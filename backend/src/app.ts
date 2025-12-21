@@ -9,7 +9,11 @@ import { config } from 'dotenv';
 import routes from './routes';
 import { initWorkspacesDir } from './services/workspace.service';
 import logger from './utils/logger';
-import { pool } from './config/database';
+import { connectMongoDB, disconnectMongoDB, isMongoConnected } from './config/mongodb';
+import kafkaProducer from './services/kafka-producer.service';
+import kafkaConsumer from './services/kafka-consumer.service';
+import responseHandler from './services/response-handler.service';
+import { isKafkaConfigured } from './config/kafka';
 
 // Load environment variables
 config();
@@ -68,25 +72,41 @@ app.use('/api/', limiter);
 // Health check endpoint (no auth required)
 app.get('/health', async (_req: Request, res: Response) => {
   try {
-    // Check database connection
-    await pool.query('SELECT 1');
+    const mongoConnected = isMongoConnected();
+    const kafkaConfigured = isKafkaConfigured();
+    const kafkaProducerConnected = kafkaProducer.isConnected();
+    const kafkaConsumerRunning = kafkaConsumer.isRunning();
 
-    res.json({
-      status: 'ok',
+    const status = mongoConnected ? 'ok' : 'degraded';
+
+    res.status(mongoConnected ? 200 : 503).json({
+      status,
       timestamp: new Date().toISOString(),
-      version: '1.0.0',
+      version: '2.0.0',
       service: 'openanalyst-api',
       environment: NODE_ENV,
-      database: 'connected',
+      database: {
+        type: 'mongodb',
+        connected: mongoConnected,
+      },
+      kafka: {
+        configured: kafkaConfigured,
+        producer: kafkaProducerConnected ? 'connected' : 'disconnected',
+        consumer: kafkaConsumerRunning ? 'running' : 'stopped',
+      },
+      features: {
+        resumeConversation: true,
+        offlineDelivery: true,
+        messageQueue: kafkaConfigured,
+      },
     });
   } catch (error) {
     res.status(503).json({
       status: 'error',
       timestamp: new Date().toISOString(),
-      version: '1.0.0',
+      version: '2.0.0',
       service: 'openanalyst-api',
       environment: NODE_ENV,
-      database: 'disconnected',
       error: (error as Error).message,
     });
   }
@@ -96,7 +116,7 @@ app.get('/health', async (_req: Request, res: Response) => {
 app.get('/', (_req: Request, res: Response) => {
   res.json({
     message: 'OpenAnalyst API - Claude Code on AWS',
-    version: '1.0.0',
+    version: '2.0.0',
     documentation: '/api',
     endpoints: {
       health: 'GET /health',
@@ -108,11 +128,25 @@ app.get('/', (_req: Request, res: Response) => {
         run: 'POST /api/agent/run (SSE streaming)',
         runSync: 'POST /api/agent/run-sync (JSON)',
         continue: 'POST /api/agent/continue (SSE streaming)',
+        resume: 'POST /api/agent/resume/:conversationId (Resume conversation)',
+        resumable: 'GET /api/agent/resumable (List resumable conversations)',
         sdkRun: 'POST /api/agent/sdk/run (SSE streaming)',
         sdkRunSync: 'POST /api/agent/sdk/run-sync (JSON)',
         conversations: 'GET /api/agent/conversations',
         messages: 'GET /api/agent/conversations/:id/messages',
       },
+      pendingResponses: {
+        list: 'GET /api/pending-responses',
+        deliver: 'GET /api/pending-responses/deliver',
+        status: 'GET /api/pending-responses/:correlationId',
+        subscribe: 'GET /api/pending-responses/subscribe (SSE)',
+        retry: 'POST /api/pending-responses/:correlationId/retry',
+      },
+    },
+    features: {
+      conversationResume: 'Resume previous conversations with full context',
+      offlineDelivery: 'Retrieve responses when you reconnect',
+      messageQueue: 'High-load handling with Kafka',
     },
   });
 });
@@ -151,16 +185,37 @@ const startServer = async () => {
     await initWorkspacesDir();
     logger.info('Workspaces directory initialized');
 
-    // Test database connection
-    await pool.query('SELECT 1');
-    logger.info('Database connection established');
+    // Connect to MongoDB
+    await connectMongoDB();
+    logger.info('MongoDB connection established');
+
+    // Initialize Kafka services if configured
+    if (isKafkaConfigured()) {
+      try {
+        await kafkaProducer.connect();
+        logger.info('Kafka producer connected');
+
+        await kafkaConsumer.start();
+        logger.info('Kafka consumer started');
+
+        await responseHandler.start();
+        logger.info('Response handler started');
+      } catch (kafkaError) {
+        logger.warn('Kafka services failed to start (optional)', { error: (kafkaError as Error).message });
+        console.warn('Kafka services not available - running without message queue');
+      }
+    } else {
+      logger.info('Kafka not configured - running without message queue');
+    }
 
     // Start server
     app.listen(parseInt(PORT as string, 10), HOST, () => {
       logger.info(`OpenAnalyst API running on http://${HOST}:${PORT}`);
       logger.info(`Environment: ${NODE_ENV}`);
-      console.log(`\n🚀 OpenAnalyst API running on http://${HOST}:${PORT}`);
+      console.log(`\nOpenAnalyst API running on http://${HOST}:${PORT}`);
       console.log(`   Environment: ${NODE_ENV}`);
+      console.log(`   Database: MongoDB`);
+      console.log(`   Message Queue: ${isKafkaConfigured() ? 'Kafka' : 'Not configured'}`);
       console.log(`   Health check: http://${HOST}:${PORT}/health`);
       console.log(`   API docs: http://${HOST}:${PORT}/\n`);
     });
@@ -177,9 +232,18 @@ const gracefulShutdown = async (signal: string) => {
   console.log(`\n${signal} received. Shutting down gracefully...`);
 
   try {
-    await pool.end();
-    logger.info('Database connections closed');
-    console.log('Database connections closed');
+    // Stop Kafka services
+    if (isKafkaConfigured()) {
+      await responseHandler.stop();
+      await kafkaConsumer.stop();
+      await kafkaProducer.disconnect();
+      logger.info('Kafka services stopped');
+    }
+
+    // Disconnect MongoDB
+    await disconnectMongoDB();
+    logger.info('MongoDB connections closed');
+    console.log('All connections closed');
     process.exit(0);
   } catch (error) {
     logger.error('Error during shutdown', { error: (error as Error).message });

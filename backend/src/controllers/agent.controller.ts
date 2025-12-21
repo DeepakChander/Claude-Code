@@ -801,6 +801,267 @@ export const compactConversation = async (req: AuthRequest, res: Response): Prom
   }
 };
 
+/**
+ * List resumable conversations (those with sessionId)
+ * GET /api/agent/resumable
+ */
+export const listResumableConversations = async (req: AuthRequest, res: Response): Promise<void> => {
+  const userId = req.user!.userId;
+  const { limit, offset } = req.query;
+
+  try {
+    const conversations = await conversationRepo.findResumable(userId, {
+      limit: limit ? parseInt(limit as string, 10) : undefined,
+      offset: offset ? parseInt(offset as string, 10) : undefined,
+    });
+
+    res.json({
+      success: true,
+      data: conversations.map((c) => ({
+        conversationId: c.conversationId,
+        title: c.title,
+        sessionId: c.sessionId,
+        workspacePath: c.workspacePath,
+        modelUsed: c.modelUsed,
+        messageCount: c.messageCount,
+        lastMessageAt: c.lastMessageAt,
+        createdAt: c.createdAt,
+      })),
+    });
+  } catch (error) {
+    logger.error('List resumable conversations error', { userId, error: (error as Error).message });
+
+    res.status(500).json({
+      success: false,
+      error: {
+        code: 'DATABASE_ERROR',
+        message: (error as Error).message,
+      },
+    });
+  }
+};
+
+/**
+ * Resume a specific conversation by ID
+ * POST /api/agent/resume/:conversationId
+ */
+export const resumeConversationById = async (req: AuthRequest, res: Response): Promise<void> => {
+  const userId = req.user!.userId;
+  const { conversationId } = req.params;
+  const { prompt, projectId } = req.body as AgentRequestBody;
+
+  if (!prompt) {
+    res.status(400).json({
+      success: false,
+      error: { code: 'VALIDATION_ERROR', message: 'prompt is required' },
+    });
+    return;
+  }
+
+  try {
+    // Get the conversation
+    const conversation = await conversationRepo.findById(conversationId);
+
+    if (!conversation) {
+      res.status(404).json({
+        success: false,
+        error: { code: 'NOT_FOUND', message: 'Conversation not found' },
+      });
+      return;
+    }
+
+    // Check if it has a session ID
+    if (!conversation.sessionId) {
+      res.status(400).json({
+        success: false,
+        error: { code: 'NO_SESSION', message: 'This conversation has no session to resume. Start a new conversation or use continue.' },
+      });
+      return;
+    }
+
+    // Get or create workspace
+    const workspace = await ensureWorkspace(userId, projectId || conversation.workspacePath || 'default');
+
+    // Log the query
+    logAgentQuery(conversation.conversationId, prompt, userId);
+
+    // Store user message
+    await messageRepo.createUserMessage(conversation.conversationId, prompt);
+
+    // Run CLI with --resume flag
+    const process = cliService.resumeSession(prompt, workspace, conversation.sessionId, res);
+
+    // Track process for cleanup
+    const processId = `${userId}:resume:${conversationId}`;
+    activeProcesses.set(processId, process);
+
+    req.on('close', () => {
+      const proc = activeProcesses.get(processId);
+      if (proc) {
+        cliService.killProcess(proc);
+        activeProcesses.delete(processId);
+      }
+    });
+
+    process.on('close', () => {
+      activeProcesses.delete(processId);
+    });
+  } catch (error) {
+    logger.error('Resume conversation error', { userId, conversationId, error: (error as Error).message });
+
+    res.status(500).json({
+      success: false,
+      error: {
+        code: 'AGENT_ERROR',
+        message: (error as Error).message,
+      },
+    });
+  }
+};
+
+/**
+ * Resume a conversation synchronously
+ * POST /api/agent/resume/:conversationId/sync
+ */
+export const resumeConversationByIdSync = async (req: AuthRequest, res: Response): Promise<void> => {
+  const userId = req.user!.userId;
+  const { conversationId } = req.params;
+  const { prompt, projectId, model } = req.body as AgentRequestBody;
+
+  if (!prompt) {
+    res.status(400).json({
+      success: false,
+      error: { code: 'VALIDATION_ERROR', message: 'prompt is required' },
+    });
+    return;
+  }
+
+  try {
+    // Get the conversation
+    const conversation = await conversationRepo.findById(conversationId);
+
+    if (!conversation) {
+      res.status(404).json({
+        success: false,
+        error: { code: 'NOT_FOUND', message: 'Conversation not found' },
+      });
+      return;
+    }
+
+    // Check if it has a session ID
+    if (!conversation.sessionId) {
+      res.status(400).json({
+        success: false,
+        error: { code: 'NO_SESSION', message: 'This conversation has no session to resume' },
+      });
+      return;
+    }
+
+    // Get or create workspace
+    const workspace = await ensureWorkspace(userId, projectId || conversation.workspacePath || 'default');
+
+    // Log the query
+    logAgentQuery(conversation.conversationId, prompt, userId);
+
+    // Store user message
+    await messageRepo.createUserMessage(conversation.conversationId, prompt);
+
+    // Run CLI with --resume flag synchronously
+    const result = await cliService.runCliSync(prompt, workspace, {
+      resume: conversation.sessionId,
+      model,
+    });
+
+    // Update session ID if changed
+    if (result.sessionId && result.sessionId !== conversation.sessionId) {
+      await conversationRepo.updateSessionId(conversation.conversationId, result.sessionId);
+    }
+
+    // Parse output and store assistant message
+    let parsedOutput = result.output;
+    try {
+      parsedOutput = JSON.parse(result.output);
+    } catch {
+      // Keep as string if not valid JSON
+    }
+
+    await messageRepo.createAssistantMessage(
+      conversation.conversationId,
+      typeof parsedOutput === 'string' ? parsedOutput : JSON.stringify(parsedOutput)
+    );
+
+    res.json({
+      success: result.success,
+      data: {
+        result: parsedOutput,
+        conversationId: conversation.conversationId,
+        sessionId: result.sessionId || conversation.sessionId,
+      },
+    });
+  } catch (error) {
+    logger.error('Resume conversation sync error', { userId, conversationId, error: (error as Error).message });
+
+    res.status(500).json({
+      success: false,
+      error: {
+        code: 'AGENT_ERROR',
+        message: (error as Error).message,
+      },
+    });
+  }
+};
+
+/**
+ * Get conversation details including session info for resume
+ * GET /api/agent/conversations/:conversationId
+ */
+export const getConversationDetails = async (req: AuthRequest, res: Response): Promise<void> => {
+  const { conversationId } = req.params;
+
+  try {
+    const conversation = await conversationRepo.findById(conversationId);
+
+    if (!conversation) {
+      res.status(404).json({
+        success: false,
+        error: { code: 'NOT_FOUND', message: 'Conversation not found' },
+      });
+      return;
+    }
+
+    res.json({
+      success: true,
+      data: {
+        conversationId: conversation.conversationId,
+        title: conversation.title,
+        workspacePath: conversation.workspacePath,
+        sessionId: conversation.sessionId,
+        modelUsed: conversation.modelUsed,
+        isArchived: conversation.isArchived,
+        isPinned: conversation.isPinned,
+        totalTokensUsed: conversation.totalTokensUsed,
+        totalCostUsd: conversation.totalCostUsd,
+        messageCount: conversation.messageCount,
+        tags: conversation.tags,
+        canResume: !!conversation.sessionId,
+        lastMessageAt: conversation.lastMessageAt,
+        createdAt: conversation.createdAt,
+        updatedAt: conversation.updatedAt,
+      },
+    });
+  } catch (error) {
+    logger.error('Get conversation details error', { conversationId, error: (error as Error).message });
+
+    res.status(500).json({
+      success: false,
+      error: {
+        code: 'DATABASE_ERROR',
+        message: (error as Error).message,
+      },
+    });
+  }
+};
+
 export default {
   runAgent,
   runAgentSync,
@@ -811,6 +1072,10 @@ export default {
   continueAgentSdkSync,
   getConversationMessages,
   listConversations,
+  listResumableConversations,
+  resumeConversationById,
+  resumeConversationByIdSync,
+  getConversationDetails,
   getUsage,
   agentHealth,
   compactConversation,

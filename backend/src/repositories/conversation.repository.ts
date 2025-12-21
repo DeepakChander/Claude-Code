@@ -1,5 +1,5 @@
-import { pool } from '../config/database';
-import { Conversation, ConversationCreateInput, ConversationUpdateInput } from '../types';
+import { Conversation, IConversation } from '../models';
+import { ConversationCreateInput, ConversationUpdateInput } from '../types';
 import { generateUUID } from '../utils/helpers';
 import logger from '../utils/logger';
 
@@ -9,35 +9,20 @@ import logger from '../utils/logger';
 export const create = async (
   userId: string,
   input: ConversationCreateInput
-): Promise<Conversation> => {
-  const conversationId = generateUUID();
-  const now = new Date();
-
-  const query = `
-    INSERT INTO conversations (
-      conversation_id, user_id, title, description, workspace_path,
-      model_used, tags, metadata, created_at, updated_at
-    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-    RETURNING *
-  `;
-
-  const values = [
-    conversationId,
-    userId,
-    input.title || null,
-    input.description || null,
-    input.workspace_path || null,
-    input.model || 'anthropic/claude-sonnet-4.5',
-    input.tags || [],
-    input.metadata || {},
-    now,
-    now,
-  ];
-
+): Promise<IConversation> => {
   try {
-    const result = await pool.query(query, values);
-    logger.info('Conversation created', { conversationId, userId });
-    return result.rows[0];
+    const conversation = new Conversation({
+      conversationId: generateUUID(),
+      userId,
+      title: input.title || 'New Conversation',
+      workspacePath: input.workspace_path || '',
+      modelUsed: input.model || 'anthropic/claude-sonnet-4',
+      tags: input.tags || [],
+    });
+
+    await conversation.save();
+    logger.info('Conversation created', { conversationId: conversation.conversationId, userId });
+    return conversation;
   } catch (error) {
     logger.error('Failed to create conversation', { userId, error });
     throw error;
@@ -47,14 +32,23 @@ export const create = async (
 /**
  * Find conversation by ID
  */
-export const findById = async (conversationId: string): Promise<Conversation | null> => {
-  const query = 'SELECT * FROM conversations WHERE conversation_id = $1';
-
+export const findById = async (conversationId: string): Promise<IConversation | null> => {
   try {
-    const result = await pool.query(query, [conversationId]);
-    return result.rows[0] || null;
+    return await Conversation.findOne({ conversationId });
   } catch (error) {
     logger.error('Failed to find conversation', { conversationId, error });
+    throw error;
+  }
+};
+
+/**
+ * Find conversation by session ID (for resume functionality)
+ */
+export const findBySessionId = async (sessionId: string): Promise<IConversation | null> => {
+  try {
+    return await Conversation.findOne({ sessionId, isArchived: false });
+  } catch (error) {
+    logger.error('Failed to find conversation by session ID', { sessionId, error });
     throw error;
   }
 };
@@ -66,20 +60,17 @@ export const findOrCreateByProject = async (
   userId: string,
   projectId: string,
   model?: string
-): Promise<Conversation> => {
-  // First try to find existing
-  const findQuery = `
-    SELECT * FROM conversations
-    WHERE user_id = $1 AND workspace_path = $2 AND is_archived = false
-    ORDER BY updated_at DESC
-    LIMIT 1
-  `;
-
+): Promise<IConversation> => {
   try {
-    const result = await pool.query(findQuery, [userId, projectId]);
+    // First try to find existing
+    const existing = await Conversation.findOne({
+      userId,
+      workspacePath: projectId,
+      isArchived: false,
+    }).sort({ updatedAt: -1 });
 
-    if (result.rows[0]) {
-      return result.rows[0];
+    if (existing) {
+      return existing;
     }
 
     // Create new conversation
@@ -100,17 +91,13 @@ export const findOrCreateByProject = async (
 export const findByUserAndProject = async (
   userId: string,
   projectId: string
-): Promise<Conversation | null> => {
-  const query = `
-    SELECT * FROM conversations
-    WHERE user_id = $1 AND workspace_path = $2 AND is_archived = false
-    ORDER BY updated_at DESC
-    LIMIT 1
-  `;
-
+): Promise<IConversation | null> => {
   try {
-    const result = await pool.query(query, [userId, projectId]);
-    return result.rows[0] || null;
+    return await Conversation.findOne({
+      userId,
+      workspacePath: projectId,
+      isArchived: false,
+    }).sort({ updatedAt: -1 });
   } catch (error) {
     logger.error('Failed to find conversation by project', { userId, projectId, error });
     throw error;
@@ -123,21 +110,40 @@ export const findByUserAndProject = async (
 export const findByUser = async (
   userId: string,
   options: { archived?: boolean; limit?: number; offset?: number } = {}
-): Promise<Conversation[]> => {
+): Promise<IConversation[]> => {
   const { archived = false, limit = 50, offset = 0 } = options;
 
-  const query = `
-    SELECT * FROM conversations
-    WHERE user_id = $1 AND is_archived = $2
-    ORDER BY updated_at DESC
-    LIMIT $3 OFFSET $4
-  `;
-
   try {
-    const result = await pool.query(query, [userId, archived, limit, offset]);
-    return result.rows;
+    return await Conversation.find({ userId, isArchived: archived })
+      .sort({ lastMessageAt: -1, updatedAt: -1 })
+      .skip(offset)
+      .limit(limit);
   } catch (error) {
     logger.error('Failed to find user conversations', { userId, error });
+    throw error;
+  }
+};
+
+/**
+ * Find all resumable conversations for a user (those with sessionId)
+ */
+export const findResumable = async (
+  userId: string,
+  options: { limit?: number; offset?: number } = {}
+): Promise<IConversation[]> => {
+  const { limit = 20, offset = 0 } = options;
+
+  try {
+    return await Conversation.find({
+      userId,
+      sessionId: { $exists: true, $ne: '' },
+      isArchived: false,
+    })
+      .sort({ lastMessageAt: -1 })
+      .skip(offset)
+      .limit(limit);
+  } catch (error) {
+    logger.error('Failed to find resumable conversations', { userId, error });
     throw error;
   }
 };
@@ -148,55 +154,27 @@ export const findByUser = async (
 export const update = async (
   conversationId: string,
   input: ConversationUpdateInput
-): Promise<Conversation | null> => {
-  const fields: string[] = [];
-  const values: unknown[] = [];
-  let paramCount = 1;
-
-  if (input.title !== undefined) {
-    fields.push(`title = $${paramCount++}`);
-    values.push(input.title);
-  }
-  if (input.description !== undefined) {
-    fields.push(`description = $${paramCount++}`);
-    values.push(input.description);
-  }
-  if (input.is_archived !== undefined) {
-    fields.push(`is_archived = $${paramCount++}`);
-    values.push(input.is_archived);
-  }
-  if (input.is_pinned !== undefined) {
-    fields.push(`is_pinned = $${paramCount++}`);
-    values.push(input.is_pinned);
-  }
-  if (input.tags !== undefined) {
-    fields.push(`tags = $${paramCount++}`);
-    values.push(input.tags);
-  }
-  if (input.metadata !== undefined) {
-    fields.push(`metadata = $${paramCount++}`);
-    values.push(input.metadata);
-  }
-
-  if (fields.length === 0) {
-    return findById(conversationId);
-  }
-
-  fields.push(`updated_at = $${paramCount++}`);
-  values.push(new Date());
-
-  values.push(conversationId);
-
-  const query = `
-    UPDATE conversations
-    SET ${fields.join(', ')}
-    WHERE conversation_id = $${paramCount}
-    RETURNING *
-  `;
-
+): Promise<IConversation | null> => {
   try {
-    const result = await pool.query(query, values);
-    return result.rows[0] || null;
+    const updateData: Record<string, unknown> = { updatedAt: new Date() };
+
+    if (input.title !== undefined) updateData.title = input.title;
+    if (input.description !== undefined) updateData.description = input.description;
+    if (input.is_archived !== undefined) updateData.isArchived = input.is_archived;
+    if (input.is_pinned !== undefined) updateData.isPinned = input.is_pinned;
+    if (input.tags !== undefined) updateData.tags = input.tags;
+    if (input.metadata !== undefined) updateData.metadata = input.metadata;
+
+    const conversation = await Conversation.findOneAndUpdate(
+      { conversationId },
+      { $set: updateData },
+      { new: true }
+    );
+
+    if (conversation) {
+      logger.info('Conversation updated', { conversationId });
+    }
+    return conversation;
   } catch (error) {
     logger.error('Failed to update conversation', { conversationId, error });
     throw error;
@@ -204,20 +182,17 @@ export const update = async (
 };
 
 /**
- * Update session ID for Claude --continue functionality
+ * Update session ID for Claude --resume functionality
  */
 export const updateSessionId = async (
   conversationId: string,
   sessionId: string
 ): Promise<void> => {
-  const query = `
-    UPDATE conversations
-    SET session_id = $1, updated_at = $2
-    WHERE conversation_id = $3
-  `;
-
   try {
-    await pool.query(query, [sessionId, new Date(), conversationId]);
+    await Conversation.updateOne(
+      { conversationId },
+      { $set: { sessionId, updatedAt: new Date() } }
+    );
     logger.info('Session ID updated', { conversationId, sessionId });
   } catch (error) {
     logger.error('Failed to update session ID', { conversationId, error });
@@ -234,26 +209,41 @@ export const updateTokenUsage = async (
   tokensOutput: number,
   costUsd: number
 ): Promise<void> => {
-  const query = `
-    UPDATE conversations
-    SET
-      total_tokens_used = total_tokens_used + $1,
-      total_cost_usd = total_cost_usd + $2,
-      message_count = message_count + 1,
-      last_message_at = $3,
-      updated_at = $3
-    WHERE conversation_id = $4
-  `;
-
   try {
-    await pool.query(query, [
-      tokensInput + tokensOutput,
-      costUsd,
-      new Date(),
-      conversationId,
-    ]);
+    await Conversation.updateOne(
+      { conversationId },
+      {
+        $inc: {
+          totalTokensUsed: tokensInput + tokensOutput,
+          totalCostUsd: costUsd,
+          messageCount: 1,
+        },
+        $set: {
+          lastMessageAt: new Date(),
+          updatedAt: new Date(),
+        },
+      }
+    );
   } catch (error) {
     logger.error('Failed to update token usage', { conversationId, error });
+    throw error;
+  }
+};
+
+/**
+ * Update model used
+ */
+export const updateModel = async (
+  conversationId: string,
+  model: string
+): Promise<void> => {
+  try {
+    await Conversation.updateOne(
+      { conversationId },
+      { $set: { modelUsed: model, updatedAt: new Date() } }
+    );
+  } catch (error) {
+    logger.error('Failed to update model', { conversationId, error });
     throw error;
   }
 };
@@ -262,13 +252,37 @@ export const updateTokenUsage = async (
  * Delete conversation
  */
 export const deleteConversation = async (conversationId: string): Promise<boolean> => {
-  const query = 'DELETE FROM conversations WHERE conversation_id = $1';
-
   try {
-    const result = await pool.query(query, [conversationId]);
-    return (result.rowCount ?? 0) > 0;
+    const result = await Conversation.deleteOne({ conversationId });
+    return result.deletedCount > 0;
   } catch (error) {
     logger.error('Failed to delete conversation', { conversationId, error });
+    throw error;
+  }
+};
+
+/**
+ * Archive conversation
+ */
+export const archive = async (conversationId: string): Promise<IConversation | null> => {
+  return update(conversationId, { is_archived: true });
+};
+
+/**
+ * Pin conversation
+ */
+export const pin = async (conversationId: string, pinned: boolean = true): Promise<IConversation | null> => {
+  return update(conversationId, { is_pinned: pinned });
+};
+
+/**
+ * Count conversations for a user
+ */
+export const countByUser = async (userId: string, archived: boolean = false): Promise<number> => {
+  try {
+    return await Conversation.countDocuments({ userId, isArchived: archived });
+  } catch (error) {
+    logger.error('Failed to count user conversations', { userId, error });
     throw error;
   }
 };
@@ -276,11 +290,17 @@ export const deleteConversation = async (conversationId: string): Promise<boolea
 export default {
   create,
   findById,
+  findBySessionId,
   findOrCreateByProject,
   findByUserAndProject,
   findByUser,
+  findResumable,
   update,
   updateSessionId,
   updateTokenUsage,
+  updateModel,
   delete: deleteConversation,
+  archive,
+  pin,
+  countByUser,
 };

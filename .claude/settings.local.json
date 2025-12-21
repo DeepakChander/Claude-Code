@@ -3,7 +3,19 @@
     "allow": [
       "Bash(node --version:*)",
       "Bash(npm:*)",
-      "Bash(claude:*)"
+      "Bash(claude:*)",
+      "Bash(dir:*)",
+      "WebSearch",
+      "mcp__ide__getDiagnostics",
+      "WebFetch(domain:openrouter.ai)",
+      "Bash(curl:*)",
+      "Bash(node -e:*)",
+      "WebFetch(domain:docs.anthropic.com)",
+      "WebFetch(domain:shipyard.build)",
+      "Bash(node dist/index.js:*)",
+      "Bash(openanalyst --version:*)",
+      "Bash(tree:*)",
+      "Bash(ssh:*)"
     ]
   }
 }
