@@ -3,7 +3,6 @@ import {
   getKafkaClient,
   kafkaConfig,
   KafkaRequestMessage,
-  KafkaResponseMessage,
   createSuccessResponseMessage,
   createErrorResponseMessage,
   isKafkaConfigured,

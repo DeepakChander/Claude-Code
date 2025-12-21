@@ -48,10 +48,10 @@ export const runAgent = async (req: AuthRequest, res: Response): Promise<void> =
     const conversation = await conversationRepo.findOrCreateByProject(userId, projectId, model);
 
     // Log the query
-    logAgentQuery(conversation.conversation_id, prompt, userId);
+    logAgentQuery(conversation.conversationId, prompt, userId);
 
     // Store user message
-    await messageRepo.createUserMessage(conversation.conversation_id, prompt);
+    await messageRepo.createUserMessage(conversation.conversationId, prompt);
 
     // Run CLI with streaming
     const process = cliService.runCliStreaming(prompt, workspace, res, {
@@ -117,10 +117,10 @@ export const runAgentSync = async (req: AuthRequest, res: Response): Promise<voi
     const conversation = await conversationRepo.findOrCreateByProject(userId, projectId, model);
 
     // Log the query
-    logAgentQuery(conversation.conversation_id, prompt, userId);
+    logAgentQuery(conversation.conversationId, prompt, userId);
 
     // Store user message
-    await messageRepo.createUserMessage(conversation.conversation_id, prompt);
+    await messageRepo.createUserMessage(conversation.conversationId, prompt);
 
     // Run CLI synchronously
     const result = await cliService.runCliSync(prompt, workspace, {
@@ -132,7 +132,7 @@ export const runAgentSync = async (req: AuthRequest, res: Response): Promise<voi
 
     // Update session ID if available
     if (result.sessionId) {
-      await conversationRepo.updateSessionId(conversation.conversation_id, result.sessionId);
+      await conversationRepo.updateSessionId(conversation.conversationId, result.sessionId);
     }
 
     // Parse output and store assistant message
@@ -144,7 +144,7 @@ export const runAgentSync = async (req: AuthRequest, res: Response): Promise<voi
     }
 
     await messageRepo.createAssistantMessage(
-      conversation.conversation_id,
+      conversation.conversationId,
       typeof parsedOutput === 'string' ? parsedOutput : JSON.stringify(parsedOutput)
     );
 
@@ -152,7 +152,7 @@ export const runAgentSync = async (req: AuthRequest, res: Response): Promise<voi
       success: result.success,
       data: {
         result: parsedOutput,
-        conversationId: conversation.conversation_id,
+        conversationId: conversation.conversationId,
         sessionId: result.sessionId,
       },
     });
@@ -205,10 +205,10 @@ export const continueAgent = async (req: AuthRequest, res: Response): Promise<vo
     }
 
     // Log the query
-    logAgentQuery(conversation.conversation_id, prompt, userId);
+    logAgentQuery(conversation.conversationId, prompt, userId);
 
     // Store user message
-    await messageRepo.createUserMessage(conversation.conversation_id, prompt);
+    await messageRepo.createUserMessage(conversation.conversationId, prompt);
 
     // Run CLI with --continue flag
     const process = cliService.continueConversation(prompt, workspace, res);
@@ -269,8 +269,8 @@ export const runAgentSdk = async (req: AuthRequest, res: Response): Promise<void
 
     if (conversationId) {
       conversation = await conversationRepo.findById(conversationId);
-      if (conversation?.session_id) {
-        resumeSessionId = conversation.session_id;
+      if (conversation?.sessionId) {
+        resumeSessionId = conversation.sessionId;
       }
     }
 
@@ -279,10 +279,10 @@ export const runAgentSdk = async (req: AuthRequest, res: Response): Promise<void
     }
 
     // Log the query
-    logAgentQuery(conversation.conversation_id, prompt, userId);
+    logAgentQuery(conversation.conversationId, prompt, userId);
 
     // Store user message
-    await messageRepo.createUserMessage(conversation.conversation_id, prompt);
+    await messageRepo.createUserMessage(conversation.conversationId, prompt);
 
     // Run SDK with streaming
     await sdkService.runSdkStreaming(prompt, workspace, res, {
@@ -333,8 +333,8 @@ export const runAgentSdkSync = async (req: AuthRequest, res: Response): Promise<
 
     if (conversationId) {
       conversation = await conversationRepo.findById(conversationId);
-      if (conversation?.session_id) {
-        resumeSessionId = conversation.session_id;
+      if (conversation?.sessionId) {
+        resumeSessionId = conversation.sessionId;
       }
     }
 
@@ -343,10 +343,10 @@ export const runAgentSdkSync = async (req: AuthRequest, res: Response): Promise<
     }
 
     // Log the query
-    logAgentQuery(conversation.conversation_id, prompt, userId);
+    logAgentQuery(conversation.conversationId, prompt, userId);
 
     // Store user message
-    await messageRepo.createUserMessage(conversation.conversation_id, prompt);
+    await messageRepo.createUserMessage(conversation.conversationId, prompt);
 
     // Run SDK synchronously
     const result = await sdkService.runSdkSync(prompt, workspace, {
@@ -359,13 +359,13 @@ export const runAgentSdkSync = async (req: AuthRequest, res: Response): Promise<
 
     // Update session ID if available
     if (result.sessionId) {
-      await conversationRepo.updateSessionId(conversation.conversation_id, result.sessionId);
+      await conversationRepo.updateSessionId(conversation.conversationId, result.sessionId);
     }
 
     // Update token usage
     if (result.tokensInput && result.tokensOutput) {
       await conversationRepo.updateTokenUsage(
-        conversation.conversation_id,
+        conversation.conversationId,
         result.tokensInput,
         result.tokensOutput,
         result.costUsd || 0
@@ -374,7 +374,7 @@ export const runAgentSdkSync = async (req: AuthRequest, res: Response): Promise<
 
     // Store assistant message
     await messageRepo.createAssistantMessage(
-      conversation.conversation_id,
+      conversation.conversationId,
       result.output,
       {
         tokensInput: result.tokensInput,
@@ -388,7 +388,7 @@ export const runAgentSdkSync = async (req: AuthRequest, res: Response): Promise<
       success: result.success,
       data: {
         result: result.output,
-        conversationId: conversation.conversation_id,
+        conversationId: conversation.conversationId,
         sessionId: result.sessionId,
         usage: {
           tokensInput: result.tokensInput,
@@ -441,8 +441,8 @@ export const continueAgentSdk = async (req: AuthRequest, res: Response): Promise
       conversation = await conversationRepo.findOrCreateByProject(userId, projectId, model);
     }
 
-    if (conversation?.session_id) {
-      resumeSessionId = conversation.session_id;
+    if (conversation?.sessionId) {
+      resumeSessionId = conversation.sessionId;
     }
 
     if (!conversation) {
@@ -454,10 +454,10 @@ export const continueAgentSdk = async (req: AuthRequest, res: Response): Promise
     }
 
     // Log the query
-    logAgentQuery(conversation.conversation_id, prompt, userId);
+    logAgentQuery(conversation.conversationId, prompt, userId);
 
     // Store user message
-    await messageRepo.createUserMessage(conversation.conversation_id, prompt);
+    await messageRepo.createUserMessage(conversation.conversationId, prompt);
 
     // Run SDK with session resume
     await sdkService.runSdkStreaming(prompt, workspace, res, {
@@ -510,8 +510,8 @@ export const continueAgentSdkSync = async (req: AuthRequest, res: Response): Pro
       conversation = await conversationRepo.findOrCreateByProject(userId, projectId, model);
     }
 
-    if (conversation?.session_id) {
-      resumeSessionId = conversation.session_id;
+    if (conversation?.sessionId) {
+      resumeSessionId = conversation.sessionId;
     }
 
     if (!conversation) {
@@ -523,10 +523,10 @@ export const continueAgentSdkSync = async (req: AuthRequest, res: Response): Pro
     }
 
     // Log the query
-    logAgentQuery(conversation.conversation_id, prompt, userId);
+    logAgentQuery(conversation.conversationId, prompt, userId);
 
     // Store user message
-    await messageRepo.createUserMessage(conversation.conversation_id, prompt);
+    await messageRepo.createUserMessage(conversation.conversationId, prompt);
 
     // Run SDK synchronously with resume
     const result = await sdkService.runSdkSync(prompt, workspace, {
@@ -539,13 +539,13 @@ export const continueAgentSdkSync = async (req: AuthRequest, res: Response): Pro
 
     // Update session ID if new one was created
     if (result.sessionId) {
-      await conversationRepo.updateSessionId(conversation.conversation_id, result.sessionId);
+      await conversationRepo.updateSessionId(conversation.conversationId, result.sessionId);
     }
 
     // Update token usage
     if (result.tokensInput && result.tokensOutput) {
       await conversationRepo.updateTokenUsage(
-        conversation.conversation_id,
+        conversation.conversationId,
         result.tokensInput,
         result.tokensOutput,
         result.costUsd || 0
@@ -554,7 +554,7 @@ export const continueAgentSdkSync = async (req: AuthRequest, res: Response): Pro
 
     // Store assistant message
     await messageRepo.createAssistantMessage(
-      conversation.conversation_id,
+      conversation.conversationId,
       result.output,
       {
         tokensInput: result.tokensInput,
@@ -568,7 +568,7 @@ export const continueAgentSdkSync = async (req: AuthRequest, res: Response): Pro
       success: result.success,
       data: {
         result: result.output,
-        conversationId: conversation.conversation_id,
+        conversationId: conversation.conversationId,
         sessionId: result.sessionId,
         usage: {
           tokensInput: result.tokensInput,
@@ -677,10 +677,10 @@ export const getUsage = async (req: AuthRequest, res: Response): Promise<void> =
     res.json({
       success: true,
       data: {
-        tokensInput: conversation.total_tokens_used || 0,
+        tokensInput: conversation.totalTokensUsed || 0,
         tokensOutput: 0, // We store total, need to split if needed
-        costUsd: conversation.total_cost_usd || 0,
-        messageCount: conversation.message_count || 0,
+        costUsd: conversation.totalCostUsd || 0,
+        messageCount: conversation.messageCount || 0,
       },
     });
   } catch (error) {
@@ -761,7 +761,7 @@ export const compactConversation = async (req: AuthRequest, res: Response): Prom
     }
 
     // Get all messages
-    const messages = await messageRepo.findByConversation(conversation.conversation_id);
+    const messages = await messageRepo.findByConversation(conversation.conversationId);
 
     if (messages.length < 5) {
       res.json({

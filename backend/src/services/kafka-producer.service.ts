@@ -2,7 +2,6 @@ import { Producer, ProducerRecord } from 'kafkajs';
 import {
   getKafkaClient,
   kafkaConfig,
-  KafkaRequestMessage,
   createRequestMessage,
   isKafkaConfigured,
 } from '../config/kafka';
