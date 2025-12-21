@@ -1,7 +1,7 @@
 {
-  "name": "openanalyst",
+  "name": "@openanalyst/cli",
   "version": "1.0.0",
-  "description": "CLI for OpenAnalyst API - Claude Code on AWS",
+  "description": "CLI for OpenAnalyst API - Run Claude Code from anywhere",
   "main": "dist/index.js",
   "bin": {
     "openanalyst": "./dist/index.js",
@@ -10,10 +10,38 @@
   "scripts": {
     "build": "tsc",
     "start": "node dist/index.js",
-    "dev": "ts-node src/index.ts"
+    "dev": "ts-node src/index.ts",
+    "prepublishOnly": "npm run build"
   },
-  "keywords": ["claude", "ai", "cli", "openanalyst"],
-  "author": "",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/DeepakChander/Claude-Code.git"
+  },
+  "homepage": "https://github.com/DeepakChander/Claude-Code#readme",
+  "bugs": {
+    "url": "https://github.com/DeepakChander/Claude-Code/issues"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "keywords": [
+    "claude",
+    "ai",
+    "cli",
+    "openanalyst",
+    "anthropic",
+    "agent",
+    "chatgpt",
+    "openrouter"
+  ],
+  "author": "DeepakChander",
   "license": "MIT",
   "dependencies": {
     "chalk": "^4.1.2",
