@@ -44,17 +44,18 @@ try {
 
 Write-Host ""
 
-# Create temp directory
-$tempDir = Join-Path $env:TEMP "openanalyst-cli-install"
-if (Test-Path $tempDir) {
-    Remove-Item -Recurse -Force $tempDir
+# Create permanent installation directory
+$installDir = Join-Path $env:LOCALAPPDATA "openanalyst-cli"
+if (Test-Path $installDir) {
+    Write-Host "Removing previous installation..." -ForegroundColor Yellow
+    Remove-Item -Recurse -Force $installDir
 }
-New-Item -ItemType Directory -Path $tempDir | Out-Null
+New-Item -ItemType Directory -Path $installDir | Out-Null
 
 Write-Host "Downloading OpenAnalyst CLI..." -ForegroundColor Yellow
 try {
     # Clone or download the repository
-    Set-Location $tempDir
+    Set-Location $installDir
     git clone --depth 1 https://github.com/DeepakChander/Claude-Code.git .
     Write-Host "  Download complete" -ForegroundColor Green
 } catch {
@@ -62,7 +63,9 @@ try {
     try {
         Invoke-WebRequest -Uri "https://github.com/DeepakChander/Claude-Code/archive/refs/heads/main.zip" -OutFile "cli.zip"
         Expand-Archive -Path "cli.zip" -DestinationPath "." -Force
-        Move-Item -Path "Claude-Code-main/*" -Destination "." -Force
+        Move-Item -Path "Claude-Code-main\*" -Destination "." -Force
+        Remove-Item -Path "Claude-Code-main" -Force -ErrorAction SilentlyContinue
+        Remove-Item -Path "cli.zip" -Force -ErrorAction SilentlyContinue
         Write-Host "  Download complete" -ForegroundColor Green
     } catch {
         Write-Host "  Download failed!" -ForegroundColor Red
@@ -75,7 +78,7 @@ Write-Host ""
 # Install CLI
 Write-Host "Installing OpenAnalyst CLI..." -ForegroundColor Yellow
 try {
-    Set-Location (Join-Path $tempDir "cli")
+    Set-Location (Join-Path $installDir "cli")
     npm install --silent
     npm run build --silent
     npm link --force
@@ -87,9 +90,8 @@ try {
     exit 1
 }
 
-# Cleanup
+# Return to user home
 Set-Location $env:USERPROFILE
-Remove-Item -Recurse -Force $tempDir -ErrorAction SilentlyContinue
 
 Write-Host ""
 

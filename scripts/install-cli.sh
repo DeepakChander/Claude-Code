@@ -53,9 +53,14 @@ echo -e "${GREEN}  npm $NPM_VERSION detected${NC}"
 
 echo ""
 
-# Create temp directory
-TEMP_DIR=$(mktemp -d)
-cd "$TEMP_DIR"
+# Create permanent installation directory
+INSTALL_DIR="$HOME/.openanalyst-cli"
+if [ -d "$INSTALL_DIR" ]; then
+    echo -e "${YELLOW}Removing previous installation...${NC}"
+    rm -rf "$INSTALL_DIR"
+fi
+mkdir -p "$INSTALL_DIR"
+cd "$INSTALL_DIR"
 
 # Download and install
 echo -e "${YELLOW}Downloading OpenAnalyst CLI...${NC}"
@@ -64,6 +69,7 @@ if command -v git &> /dev/null; then
 else
     curl -sL https://github.com/DeepakChander/Claude-Code/archive/refs/heads/main.tar.gz | tar xz
     mv Claude-Code-main/* .
+    rm -rf Claude-Code-main
 fi
 echo -e "${GREEN}  Download complete${NC}"
 
@@ -78,9 +84,8 @@ npm link --force 2>/dev/null || sudo npm link --force
 
 echo -e "${GREEN}  Installation successful!${NC}"
 
-# Cleanup
+# Return to home
 cd ~
-rm -rf "$TEMP_DIR"
 
 echo ""
 
