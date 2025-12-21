@@ -44,16 +44,52 @@ try {
 
 Write-Host ""
 
-# Install OpenAnalyst CLI
+# Create temp directory
+$tempDir = Join-Path $env:TEMP "openanalyst-cli-install"
+if (Test-Path $tempDir) {
+    Remove-Item -Recurse -Force $tempDir
+}
+New-Item -ItemType Directory -Path $tempDir | Out-Null
+
+Write-Host "Downloading OpenAnalyst CLI..." -ForegroundColor Yellow
+try {
+    # Clone or download the repository
+    Set-Location $tempDir
+    git clone --depth 1 https://github.com/DeepakChander/Claude-Code.git .
+    Write-Host "  Download complete" -ForegroundColor Green
+} catch {
+    Write-Host "  Git clone failed, trying alternative method..." -ForegroundColor Yellow
+    try {
+        Invoke-WebRequest -Uri "https://github.com/DeepakChander/Claude-Code/archive/refs/heads/main.zip" -OutFile "cli.zip"
+        Expand-Archive -Path "cli.zip" -DestinationPath "." -Force
+        Move-Item -Path "Claude-Code-main/*" -Destination "." -Force
+        Write-Host "  Download complete" -ForegroundColor Green
+    } catch {
+        Write-Host "  Download failed!" -ForegroundColor Red
+        exit 1
+    }
+}
+
+Write-Host ""
+
+# Install CLI
 Write-Host "Installing OpenAnalyst CLI..." -ForegroundColor Yellow
 try {
-    npm install -g @openanalyst/cli
+    Set-Location (Join-Path $tempDir "cli")
+    npm install --silent
+    npm run build --silent
+    npm link --force
     Write-Host "  Installation successful!" -ForegroundColor Green
 } catch {
     Write-Host "  Installation failed!" -ForegroundColor Red
+    Write-Host "  Error: $_" -ForegroundColor Red
     Write-Host "  Try running PowerShell as Administrator" -ForegroundColor Yellow
     exit 1
 }
+
+# Cleanup
+Set-Location $env:USERPROFILE
+Remove-Item -Recurse -Force $tempDir -ErrorAction SilentlyContinue
 
 Write-Host ""
 

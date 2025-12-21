@@ -4,8 +4,8 @@
   "description": "CLI for OpenAnalyst API - Run Claude Code from anywhere",
   "main": "dist/index.js",
   "bin": {
-    "openanalyst": "./dist/index.js",
-    "oa": "./dist/index.js"
+    "openanalyst": "dist/index.js",
+    "oa": "dist/index.js"
   },
   "scripts": {
     "build": "tsc",

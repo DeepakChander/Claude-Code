@@ -53,11 +53,34 @@ echo -e "${GREEN}  npm $NPM_VERSION detected${NC}"
 
 echo ""
 
-# Install OpenAnalyst CLI
+# Create temp directory
+TEMP_DIR=$(mktemp -d)
+cd "$TEMP_DIR"
+
+# Download and install
+echo -e "${YELLOW}Downloading OpenAnalyst CLI...${NC}"
+if command -v git &> /dev/null; then
+    git clone --depth 1 https://github.com/DeepakChander/Claude-Code.git .
+else
+    curl -sL https://github.com/DeepakChander/Claude-Code/archive/refs/heads/main.tar.gz | tar xz
+    mv Claude-Code-main/* .
+fi
+echo -e "${GREEN}  Download complete${NC}"
+
+echo ""
+
+# Install CLI
 echo -e "${YELLOW}Installing OpenAnalyst CLI...${NC}"
-npm install -g @openanalyst/cli
+cd cli
+npm install --silent
+npm run build --silent
+npm link --force 2>/dev/null || sudo npm link --force
 
 echo -e "${GREEN}  Installation successful!${NC}"
+
+# Cleanup
+cd ~
+rm -rf "$TEMP_DIR"
 
 echo ""
 
