@@ -227,7 +227,7 @@ Confluent Cloud is a fully managed Kafka service. We'll use it for message queui
      - For US: `us-east-1` (Virginia)
 
 4. Cluster Name:
-   - Enter: `openanalyst-kafka`
+- Enter: `openanalyst-kafka`
 
 5. Click **"Launch cluster"**
 
