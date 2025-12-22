@@ -604,16 +604,40 @@ export const runChatStreaming = async (
       useReasoning,
     })}\n\n`);
 
-    // Build system prompt
+    // Build system prompt with TodoWrite instructions
     const systemPrompt = options.systemPrompt || options.appendSystemPrompt ||
       `You are Claude, an AI coding assistant. You have access to tools to read, write, and edit files, and run bash commands.
 Current working directory: ${workspacePath}
 
-When the user asks you to create, modify, or interact with files, use the available tools.
-Always use the Write tool to create new files.
-Always use the Edit tool to modify existing files.
-Always use the Read tool to view file contents.
-Always use the Bash tool to run shell commands.`;
+## CRITICAL: Task Planning with TodoWrite
+
+For ANY task that requires 2 or more steps, you MUST use the TodoWrite tool FIRST before doing anything else.
+
+**TodoWrite Usage:**
+1. BEFORE starting work, create a complete task list using TodoWrite
+2. Each todo item needs: content (what to do), activeForm (present continuous form), status (start as 'pending')
+3. Update the todo list as you work: mark current task as 'in_progress', completed tasks as 'completed'
+4. Call TodoWrite again whenever a task status changes
+
+**Example - "Create an Express server with user authentication":**
+First, call TodoWrite to create a task list:
+TodoWrite({
+  todos: [
+    { content: "Create package.json with dependencies", activeForm: "Creating package.json", status: "pending" },
+    { content: "Create server.js with Express setup", activeForm: "Creating server.js", status: "pending" },
+    { content: "Add authentication middleware", activeForm: "Adding authentication middleware", status: "pending" },
+    { content: "Create user routes", activeForm: "Creating user routes", status: "pending" },
+    { content: "Test the endpoints", activeForm: "Testing endpoints", status: "pending" }
+  ]
+})
+
+Then mark first task as in_progress before working on it.
+
+## File Operations
+- Always use the Write tool to create new files.
+- Always use the Edit tool to modify existing files.
+- Always use the Read tool to view file contents.
+- Always use the Bash tool to run shell commands.`;
 
     // Build OpenRouter-compatible request body
     const requestBody: Record<string, unknown> = {
@@ -831,32 +855,49 @@ Always use the Bash tool to run shell commands.`;
 
     // Store conversation - include both text content AND tool_use blocks
     // This is critical for proper tool_use/tool_result matching
+    // The Anthropic SDK expects specific block types - we must construct them correctly
     if (fullContent || toolCalls.length > 0) {
-      // Use a more flexible type to avoid SDK type strictness issues
-      const assistantContent: Array<{ type: string; text?: string; id?: string; name?: string; input?: unknown }> = [];
+      const assistantContent: Anthropic.ContentBlockParam[] = [];
 
       // Add text content if present
       if (fullContent) {
-        assistantContent.push({ type: 'text', text: fullContent });
+        assistantContent.push({
+          type: 'text' as const,
+          text: fullContent,
+        });
       }
 
       // Add tool_use blocks if present - these are required for matching tool_results
+      // The SDK expects ToolUseBlockParam with specific structure
       for (const tc of toolCalls) {
-        let parsedInput = {};
+        let parsedInput: Record<string, unknown> = {};
         try {
           parsedInput = JSON.parse(tc.arguments || '{}');
         } catch {
           parsedInput = {};
         }
+
+        // Construct ToolUseBlockParam properly
         assistantContent.push({
-          type: 'tool_use',
+          type: 'tool_use' as const,
           id: tc.id,
           name: tc.name,
           input: parsedInput,
-        });
+        } as Anthropic.ToolUseBlockParam);
       }
 
-      messages.push({ role: 'assistant', content: assistantContent as Anthropic.ContentBlock[] });
+      // Store with proper typing - MessageParam accepts content as ContentBlockParam[]
+      messages.push({
+        role: 'assistant' as const,
+        content: assistantContent,
+      });
+
+      logger.info('Stored assistant message with tool_use blocks', {
+        sessionId,
+        textLength: fullContent.length,
+        toolUseCount: toolCalls.length,
+        toolUseIds: toolCalls.map(t => t.id),
+      });
     }
     conversationHistory.set(sessionId, messages);
 
@@ -967,6 +1008,7 @@ export const submitToolResults = async (
     logger.info('Processing tool results from client', {
       sessionId,
       toolCount: toolResults.length,
+      submittedToolUseIds: toolResults.map(r => r.tool_use_id),
     });
 
     // Validate that tool_use_ids have matching tool_use blocks in the last assistant message
@@ -979,6 +1021,17 @@ export const submitToolResults = async (
           validToolUseIds.add((block as Anthropic.ToolUseBlock).id);
         }
       }
+      logger.info('Found tool_use blocks in last assistant message', {
+        storedToolUseIds: Array.from(validToolUseIds),
+        lastMessageContentTypes: lastAssistantMsg.content.map(b =>
+          typeof b === 'object' && 'type' in b ? b.type : typeof b
+        ),
+      });
+    } else {
+      logger.warn('No valid assistant message with content array found', {
+        lastAssistantMsgRole: lastAssistantMsg?.role,
+        contentType: lastAssistantMsg ? typeof lastAssistantMsg.content : 'undefined',
+      });
     }
 
     // Filter tool results to only include those with valid matching tool_use
@@ -988,15 +1041,21 @@ export const submitToolResults = async (
       }
       logger.warn('Skipping tool result with no matching tool_use', {
         tool_use_id: r.tool_use_id,
+        validIds: Array.from(validToolUseIds),
       });
       return false;
     });
 
     if (validToolResults.length === 0) {
-      logger.warn('No valid tool results to process', { sessionId });
+      logger.error('No valid tool results to process - tool_use_id mismatch', {
+        sessionId,
+        submittedIds: toolResults.map(r => r.tool_use_id),
+        validIds: Array.from(validToolUseIds),
+        messageCount: messages.length,
+      });
       res.write(`data: ${JSON.stringify({
         type: 'error',
-        content: 'No valid tool results found - tool_use_ids do not match any pending tool uses',
+        content: `No valid tool results found - submitted IDs [${toolResults.map(r => r.tool_use_id).join(', ')}] do not match stored IDs [${Array.from(validToolUseIds).join(', ')}]`,
       })}\n\n`);
       res.end();
       return;

@@ -108,6 +108,39 @@ export const toolDefinitions = [
       required: ['pattern'],
     },
   },
+  {
+    name: 'TodoWrite',
+    description: 'Create or update a task list to track progress on multi-step tasks. Use this BEFORE starting any task that involves multiple steps.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        todos: {
+          type: 'array',
+          description: 'Array of todo items',
+          items: {
+            type: 'object',
+            properties: {
+              content: {
+                type: 'string',
+                description: 'Description of the task to do (e.g., "Create package.json")',
+              },
+              activeForm: {
+                type: 'string',
+                description: 'Present continuous form of the task (e.g., "Creating package.json")',
+              },
+              status: {
+                type: 'string',
+                enum: ['pending', 'in_progress', 'completed'],
+                description: 'Current status of the task',
+              },
+            },
+            required: ['content', 'activeForm', 'status'],
+          },
+        },
+      },
+      required: ['todos'],
+    },
+  },
 ];
 
 export interface ToolResult {
@@ -265,6 +298,27 @@ export async function executeTool(
         } catch {
           return { success: true, output: 'No matches found' };
         }
+      }
+
+      case 'TodoWrite': {
+        // TodoWrite is handled specially - we just acknowledge it here
+        // The actual tracking is done by the task-progress.service.ts via WebSocket
+        const todos = toolInput.todos as Array<{ content: string; activeForm: string; status: string }>;
+
+        if (!todos || !Array.isArray(todos)) {
+          return { success: false, output: '', error: 'Invalid todos array' };
+        }
+
+        const todoSummary = todos.map((t, i) => {
+          const statusIcon = t.status === 'completed' ? '✅' : t.status === 'in_progress' ? '⏳' : '[ ]';
+          return `${i + 1}. ${statusIcon} ${t.content}`;
+        }).join('\n');
+
+        logger.info('TodoWrite called', { todoCount: todos.length });
+        return {
+          success: true,
+          output: `Task list updated:\n${todoSummary}`
+        };
       }
 
       default:
