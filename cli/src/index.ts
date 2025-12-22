@@ -77,12 +77,16 @@ const apiRequest = async (
 
   // For streaming, check for errors first
   if (!response.ok) {
+    let errorMessage = `HTTP ${response.status}: ${response.statusText}`;
     try {
       const errorData = await response.json() as ApiResponse;
-      throw new Error(errorData.error?.message || `HTTP ${response.status}`);
+      if (errorData.error?.message) {
+        errorMessage = errorData.error.message;
+      }
     } catch {
-      throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+      // JSON parsing failed, use default error message
     }
+    throw new Error(errorMessage);
   }
 
   return response;
