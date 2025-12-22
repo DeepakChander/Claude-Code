@@ -50,78 +50,26 @@ export interface SdkResult {
   costUsd?: number;
 }
 
-// Store conversation history for sessions
-const conversationHistory: Map<string, Anthropic.MessageParam[]> = new Map();
+// OpenAI format message types for consistent storage
+interface OpenAIToolCall {
+  id: string;
+  type: 'function';
+  function: {
+    name: string;
+    arguments: string;
+  };
+}
 
-/**
- * Validate conversation history to ensure tool_result blocks have matching tool_use blocks
- * This fixes the error: "unexpected tool_use_id found in tool_result blocks"
- */
-const validateConversationHistory = (messages: Anthropic.MessageParam[]): Anthropic.MessageParam[] => {
-  const validated: Anthropic.MessageParam[] = [];
+interface OpenAIMessage {
+  role: 'system' | 'user' | 'assistant' | 'tool';
+  content?: string | null;
+  tool_calls?: OpenAIToolCall[];
+  tool_call_id?: string;
+  name?: string;
+}
 
-  for (let i = 0; i < messages.length; i++) {
-    const msg = messages[i];
-
-    // Check if this is a user message with potential tool_result blocks
-    if (msg.role === 'user' && Array.isArray(msg.content)) {
-      const contentBlocks = msg.content as Anthropic.ContentBlockParam[];
-      const toolResults = contentBlocks.filter(
-        (b): b is Anthropic.ToolResultBlockParam =>
-          typeof b === 'object' && 'type' in b && b.type === 'tool_result'
-      );
-
-      if (toolResults.length > 0) {
-        // Get the previous assistant message to find matching tool_use blocks
-        const prevMsg = validated[validated.length - 1];
-
-        if (prevMsg?.role === 'assistant' && Array.isArray(prevMsg.content)) {
-          const assistantContent = prevMsg.content as Anthropic.ContentBlock[];
-          const toolUseIds = new Set(
-            assistantContent
-              .filter((b): b is Anthropic.ToolUseBlock =>
-                typeof b === 'object' && 'type' in b && b.type === 'tool_use'
-              )
-              .map(b => b.id)
-          );
-
-          // Only include tool_results with valid matching tool_use
-          const validContent = contentBlocks.filter(b => {
-            if (typeof b === 'object' && 'type' in b && b.type === 'tool_result') {
-              const toolResult = b as Anthropic.ToolResultBlockParam;
-              return toolUseIds.has(toolResult.tool_use_id);
-            }
-            return true; // Keep non-tool_result blocks
-          });
-
-          if (validContent.length > 0) {
-            validated.push({ ...msg, content: validContent });
-          }
-          // Skip message if all tool_results were invalid
-          continue;
-        }
-
-        // No valid previous assistant message with tool_use - skip orphaned tool_results
-        logger.warn('Skipping orphaned tool_result blocks (no matching tool_use)', {
-          toolResultIds: toolResults.map(t => t.tool_use_id),
-        });
-
-        // Keep any non-tool_result content
-        const nonToolContent = contentBlocks.filter(b =>
-          !(typeof b === 'object' && 'type' in b && b.type === 'tool_result')
-        );
-        if (nonToolContent.length > 0) {
-          validated.push({ ...msg, content: nonToolContent });
-        }
-        continue;
-      }
-    }
-
-    validated.push(msg);
-  }
-
-  return validated;
-};
+// Store conversation history in OpenAI format for consistency
+const conversationHistory: Map<string, OpenAIMessage[]> = new Map();
 
 /**
  * Generate a unique session ID
@@ -131,7 +79,60 @@ const generateSessionId = (): string => {
 };
 
 /**
+ * Build system prompt with TodoWrite instructions
+ */
+const buildSystemPrompt = (workspacePath: string, customPrompt?: string): string => {
+  return customPrompt || `You are Claude, an AI coding assistant. You have access to tools to read, write, and edit files, and run bash commands.
+Current working directory: ${workspacePath}
+
+## CRITICAL: Task Planning with TodoWrite
+
+For ANY task that requires 2 or more steps, you MUST use the TodoWrite tool FIRST before doing anything else.
+
+**TodoWrite Usage:**
+1. BEFORE starting work, create a complete task list using TodoWrite
+2. Each todo item needs: content (what to do), activeForm (present continuous form), status (start as 'pending')
+3. Update the todo list as you work: mark current task as 'in_progress', completed tasks as 'completed'
+4. Call TodoWrite again whenever a task status changes
+
+**Example - "Create an Express server with user authentication":**
+First, call TodoWrite to create a task list:
+TodoWrite({
+  todos: [
+    { content: "Create package.json with dependencies", activeForm: "Creating package.json", status: "pending" },
+    { content: "Create server.js with Express setup", activeForm: "Creating server.js", status: "pending" },
+    { content: "Add authentication middleware", activeForm: "Adding authentication middleware", status: "pending" },
+    { content: "Create user routes", activeForm: "Creating user routes", status: "pending" },
+    { content: "Test the endpoints", activeForm: "Testing endpoints", status: "pending" }
+  ]
+})
+
+Then mark first task as in_progress before working on it.
+
+## File Operations
+- Always use the Write tool to create new files.
+- Always use the Edit tool to modify existing files.
+- Always use the Read tool to view file contents.
+- Always use the Bash tool to run shell commands.`;
+};
+
+/**
+ * Convert tool definitions to OpenAI function format
+ */
+const getOpenAITools = () => {
+  return toolDefinitions.map(t => ({
+    type: 'function' as const,
+    function: {
+      name: t.name,
+      description: t.description,
+      parameters: t.input_schema,
+    },
+  }));
+};
+
+/**
  * Run with streaming output (SSE) and tool use support
+ * Uses Anthropic SDK directly
  */
 export const runSdkStreaming = async (
   prompt: string,
@@ -167,14 +168,54 @@ export const runSdkStreaming = async (
       sessionId,
     });
 
-    // Get or create conversation history
+    // Get or create conversation history (Anthropic format for SDK)
     let messages: Anthropic.MessageParam[] = [];
     if (options.resume && conversationHistory.has(options.resume)) {
-      messages = [...conversationHistory.get(options.resume)!];
+      // Convert from OpenAI format to Anthropic format
+      const openaiMessages = conversationHistory.get(options.resume)!;
+      for (const msg of openaiMessages) {
+        if (msg.role === 'user') {
+          messages.push({ role: 'user', content: msg.content || '' });
+        } else if (msg.role === 'assistant') {
+          if (msg.tool_calls && msg.tool_calls.length > 0) {
+            const content: Anthropic.ContentBlockParam[] = [];
+            if (msg.content) {
+              content.push({ type: 'text', text: msg.content });
+            }
+            for (const tc of msg.tool_calls) {
+              content.push({
+                type: 'tool_use',
+                id: tc.id,
+                name: tc.function.name,
+                input: JSON.parse(tc.function.arguments || '{}'),
+              });
+            }
+            messages.push({ role: 'assistant', content });
+          } else {
+            messages.push({ role: 'assistant', content: msg.content || '' });
+          }
+        } else if (msg.role === 'tool') {
+          // Tool results need to be added to the previous or a new user message
+          const lastMsg = messages[messages.length - 1];
+          if (lastMsg?.role === 'user' && Array.isArray(lastMsg.content)) {
+            (lastMsg.content as Anthropic.ContentBlockParam[]).push({
+              type: 'tool_result',
+              tool_use_id: msg.tool_call_id!,
+              content: msg.content || '',
+            });
+          } else {
+            messages.push({
+              role: 'user',
+              content: [{
+                type: 'tool_result',
+                tool_use_id: msg.tool_call_id!,
+                content: msg.content || '',
+              }],
+            });
+          }
+        }
+      }
     }
-
-    // Validate conversation history to prevent tool_use_id mismatch errors
-    messages = validateConversationHistory(messages);
 
     // Add new user message
     messages.push({ role: 'user', content: prompt });
@@ -186,16 +227,7 @@ export const runSdkStreaming = async (
       session_id: sessionId,
     })}\n\n`);
 
-    // Build system prompt
-    const systemPrompt = options.systemPrompt || options.appendSystemPrompt ||
-      `You are Claude, an AI coding assistant. You have access to tools to read, write, and edit files, and run bash commands.
-Current working directory: ${workspacePath}
-
-When the user asks you to create, modify, or interact with files, use the available tools.
-Always use the Write tool to create new files.
-Always use the Edit tool to modify existing files.
-Always use the Read tool to view file contents.
-Always use the Bash tool to run shell commands.`;
+    const systemPrompt = buildSystemPrompt(workspacePath, options.systemPrompt || options.appendSystemPrompt);
 
     // Agentic loop - keep going until Claude stops using tools
     let turn = 0;
@@ -299,8 +331,58 @@ Always use the Bash tool to run shell commands.`;
       messages.push({ role: 'user', content: toolResults });
     }
 
-    // Update conversation history
-    conversationHistory.set(sessionId, messages);
+    // Convert to OpenAI format for storage
+    const openaiMessages: OpenAIMessage[] = [];
+    for (const msg of messages) {
+      if (msg.role === 'user') {
+        if (typeof msg.content === 'string') {
+          openaiMessages.push({ role: 'user', content: msg.content });
+        } else if (Array.isArray(msg.content)) {
+          // Check if it's tool results
+          const toolResults = msg.content.filter(
+            (b): b is Anthropic.ToolResultBlockParam =>
+              typeof b === 'object' && 'type' in b && b.type === 'tool_result'
+          );
+          for (const tr of toolResults) {
+            openaiMessages.push({
+              role: 'tool',
+              tool_call_id: tr.tool_use_id,
+              content: typeof tr.content === 'string' ? tr.content : JSON.stringify(tr.content),
+            });
+          }
+        }
+      } else if (msg.role === 'assistant') {
+        if (typeof msg.content === 'string') {
+          openaiMessages.push({ role: 'assistant', content: msg.content });
+        } else if (Array.isArray(msg.content)) {
+          const textBlocks = msg.content.filter(
+            (b): b is Anthropic.TextBlock => typeof b === 'object' && 'type' in b && b.type === 'text'
+          );
+          const toolUseBlocks = msg.content.filter(
+            (b): b is Anthropic.ToolUseBlock => typeof b === 'object' && 'type' in b && b.type === 'tool_use'
+          );
+
+          const openaiMsg: OpenAIMessage = {
+            role: 'assistant',
+            content: textBlocks.map(b => b.text).join('\n') || null,
+          };
+
+          if (toolUseBlocks.length > 0) {
+            openaiMsg.tool_calls = toolUseBlocks.map(b => ({
+              id: b.id,
+              type: 'function' as const,
+              function: {
+                name: b.name,
+                arguments: JSON.stringify(b.input),
+              },
+            }));
+          }
+
+          openaiMessages.push(openaiMsg);
+        }
+      }
+    }
+    conversationHistory.set(sessionId, openaiMessages);
 
     // Calculate cost
     const pricing = getModelPricing(model);
@@ -373,25 +455,20 @@ export const runSdkSync = async (
     // Get or create conversation history
     let messages: Anthropic.MessageParam[] = [];
     if (options.resume && conversationHistory.has(options.resume)) {
-      messages = [...conversationHistory.get(options.resume)!];
+      // Convert from OpenAI format
+      const openaiMessages = conversationHistory.get(options.resume)!;
+      // Simple conversion - just get text content
+      for (const msg of openaiMessages) {
+        if (msg.role === 'user' || msg.role === 'assistant') {
+          messages.push({ role: msg.role, content: msg.content || '' });
+        }
+      }
     }
-
-    // Validate conversation history to prevent tool_use_id mismatch errors
-    messages = validateConversationHistory(messages);
 
     // Add new user message
     messages.push({ role: 'user', content: prompt });
 
-    // Build system prompt
-    const systemPrompt = options.systemPrompt || options.appendSystemPrompt ||
-      `You are Claude, an AI coding assistant. You have access to tools to read, write, and edit files, and run bash commands.
-Current working directory: ${workspacePath}
-
-When the user asks you to create, modify, or interact with files, use the available tools.
-Always use the Write tool to create new files.
-Always use the Edit tool to modify existing files.
-Always use the Read tool to view file contents.
-Always use the Bash tool to run shell commands.`;
+    const systemPrompt = buildSystemPrompt(workspacePath, options.systemPrompt || options.appendSystemPrompt);
 
     let totalTokensInput = 0;
     let totalTokensOutput = 0;
@@ -460,11 +537,12 @@ Always use the Bash tool to run shell commands.`;
       messages.push({ role: 'user', content: toolResults });
     }
 
-    // Update conversation history
-    if (finalOutput) {
-      messages.push({ role: 'assistant', content: finalOutput });
-    }
-    conversationHistory.set(sessionId, messages);
+    // Store in OpenAI format
+    const openaiMessages: OpenAIMessage[] = [
+      { role: 'user', content: prompt },
+      { role: 'assistant', content: finalOutput },
+    ];
+    conversationHistory.set(sessionId, openaiMessages);
 
     // Calculate cost
     const pricing = getModelPricing(model);
@@ -525,13 +603,13 @@ export const clearSession = (sessionId: string): boolean => {
 /**
  * Get session history
  */
-export const getSessionHistory = (sessionId: string): Anthropic.MessageParam[] | undefined => {
+export const getSessionHistory = (sessionId: string): OpenAIMessage[] | undefined => {
   return conversationHistory.get(sessionId);
 };
 
 /**
  * Chat mode - TRUE STREAMING with Server-Sent Events
- * Streams tokens as they're generated for real-time display
+ * Uses OpenAI-compatible format throughout for consistency
  * Supports DeepSeek reasoning via OpenRouter
  */
 export const runChatStreaming = async (
@@ -569,12 +647,16 @@ export const runChatStreaming = async (
       useReasoning,
     });
 
-    // Get or create conversation history
-    let messages: Anthropic.MessageParam[] = [];
+    // Get or create conversation history (OpenAI format)
+    let messages: OpenAIMessage[] = [];
 
     // First try server-side session history
     if (options.resume && conversationHistory.has(options.resume)) {
       messages = [...conversationHistory.get(options.resume)!];
+      logger.info('Restored session from server', {
+        sessionId: options.resume,
+        messageCount: messages.length,
+      });
     }
     // Otherwise use client-provided history (for restoring from local storage)
     else if (options.previousMessages && options.previousMessages.length > 0) {
@@ -587,9 +669,6 @@ export const runChatStreaming = async (
         sessionId,
       });
     }
-
-    // Validate conversation history to prevent tool_use_id mismatch errors
-    messages = validateConversationHistory(messages);
 
     // Add new user message
     messages.push({ role: 'user', content: prompt });
@@ -604,66 +683,21 @@ export const runChatStreaming = async (
       useReasoning,
     })}\n\n`);
 
-    // Build system prompt with TodoWrite instructions
-    const systemPrompt = options.systemPrompt || options.appendSystemPrompt ||
-      `You are Claude, an AI coding assistant. You have access to tools to read, write, and edit files, and run bash commands.
-Current working directory: ${workspacePath}
+    const systemPrompt = buildSystemPrompt(workspacePath, options.systemPrompt || options.appendSystemPrompt);
 
-## CRITICAL: Task Planning with TodoWrite
-
-For ANY task that requires 2 or more steps, you MUST use the TodoWrite tool FIRST before doing anything else.
-
-**TodoWrite Usage:**
-1. BEFORE starting work, create a complete task list using TodoWrite
-2. Each todo item needs: content (what to do), activeForm (present continuous form), status (start as 'pending')
-3. Update the todo list as you work: mark current task as 'in_progress', completed tasks as 'completed'
-4. Call TodoWrite again whenever a task status changes
-
-**Example - "Create an Express server with user authentication":**
-First, call TodoWrite to create a task list:
-TodoWrite({
-  todos: [
-    { content: "Create package.json with dependencies", activeForm: "Creating package.json", status: "pending" },
-    { content: "Create server.js with Express setup", activeForm: "Creating server.js", status: "pending" },
-    { content: "Add authentication middleware", activeForm: "Adding authentication middleware", status: "pending" },
-    { content: "Create user routes", activeForm: "Creating user routes", status: "pending" },
-    { content: "Test the endpoints", activeForm: "Testing endpoints", status: "pending" }
-  ]
-})
-
-Then mark first task as in_progress before working on it.
-
-## File Operations
-- Always use the Write tool to create new files.
-- Always use the Edit tool to modify existing files.
-- Always use the Read tool to view file contents.
-- Always use the Bash tool to run shell commands.`;
-
-    // Build OpenRouter-compatible request body
+    // Build request body - messages are already in OpenAI format
     const requestBody: Record<string, unknown> = {
       model,
       messages: [
         { role: 'system', content: systemPrompt },
-        ...messages.map(m => ({
-          role: m.role,
-          content: typeof m.content === 'string' ? m.content : JSON.stringify(m.content),
-        })),
+        ...messages,
       ],
       max_tokens: maxTokens,
       stream: true,
-      // Tool definitions in OpenAI function-calling format
-      tools: toolDefinitions.map(t => ({
-        type: 'function',
-        function: {
-          name: t.name,
-          description: t.description,
-          parameters: t.input_schema,
-        },
-      })),
+      tools: getOpenAITools(),
     };
 
     // For DeepSeek R1 models, add reasoning configuration
-    // OpenRouter uses "include_reasoning" parameter for DeepSeek
     if (useReasoning) {
       requestBody['include_reasoning'] = true;
       logger.info('Reasoning/thinking enabled for model', { model });
@@ -706,7 +740,7 @@ Then mark first task as in_progress before working on it.
     let buffer = '';
     let fullContent = '';
     let reasoningContent = '';
-    const toolCalls: Array<{ id: string; name: string; arguments: string }> = [];
+    const toolCalls: OpenAIToolCall[] = [];
     let currentToolCall: { id: string; name: string; arguments: string } | null = null;
     let chunkCount = 0;
 
@@ -751,7 +785,6 @@ Then mark first task as in_progress before working on it.
           const delta = choice.delta;
 
           // Handle reasoning/thinking content from DeepSeek
-          // OpenRouter returns reasoning in delta.reasoning or delta.reasoning_content
           const thinking = delta?.reasoning || delta?.reasoning_content || parsed.reasoning;
           if (thinking) {
             reasoningContent += thinking;
@@ -778,7 +811,14 @@ Then mark first task as in_progress before working on it.
                 if (tc.id) {
                   // New tool call starting
                   if (currentToolCall) {
-                    toolCalls.push(currentToolCall);
+                    toolCalls.push({
+                      id: currentToolCall.id,
+                      type: 'function',
+                      function: {
+                        name: currentToolCall.name,
+                        arguments: currentToolCall.arguments,
+                      },
+                    });
                   }
                   currentToolCall = {
                     id: tc.id,
@@ -821,7 +861,7 @@ Then mark first task as in_progress before working on it.
             });
           }
         } catch (parseError) {
-          // Skip non-JSON lines, log only if it looks like it should be JSON
+          // Skip non-JSON lines
           if (data.startsWith('{')) {
             logger.warn('Failed to parse SSE data', { data: data.substring(0, 100) });
           }
@@ -831,75 +871,54 @@ Then mark first task as in_progress before working on it.
 
     // Push last tool call if exists
     if (currentToolCall) {
-      toolCalls.push(currentToolCall);
+      toolCalls.push({
+        id: currentToolCall.id,
+        type: 'function',
+        function: {
+          name: currentToolCall.name,
+          arguments: currentToolCall.arguments,
+        },
+      });
     }
 
     // Send tool calls to client for execution
     for (const tc of toolCalls) {
       let parsedInput = {};
       try {
-        parsedInput = JSON.parse(tc.arguments || '{}');
+        parsedInput = JSON.parse(tc.function.arguments || '{}');
       } catch {
-        logger.warn('Failed to parse tool arguments', { tool: tc.name, args: tc.arguments });
+        logger.warn('Failed to parse tool arguments', { tool: tc.function.name, args: tc.function.arguments });
         parsedInput = {};
       }
 
       res.write(`data: ${JSON.stringify({
         type: 'tool_use',
-        tool: tc.name,
+        tool: tc.function.name,
         input: parsedInput,
         tool_use_id: tc.id,
         execute_locally: true,
       })}\n\n`);
     }
 
-    // Store conversation - include both text content AND tool_use blocks
-    // This is critical for proper tool_use/tool_result matching
-    // The Anthropic SDK expects specific block types - we must construct them correctly
-    if (fullContent || toolCalls.length > 0) {
-      const assistantContent: Anthropic.ContentBlockParam[] = [];
+    // Store conversation in OpenAI format
+    const assistantMessage: OpenAIMessage = {
+      role: 'assistant',
+      content: fullContent || null,
+    };
 
-      // Add text content if present
-      if (fullContent) {
-        assistantContent.push({
-          type: 'text' as const,
-          text: fullContent,
-        });
-      }
-
-      // Add tool_use blocks if present - these are required for matching tool_results
-      // The SDK expects ToolUseBlockParam with specific structure
-      for (const tc of toolCalls) {
-        let parsedInput: Record<string, unknown> = {};
-        try {
-          parsedInput = JSON.parse(tc.arguments || '{}');
-        } catch {
-          parsedInput = {};
-        }
-
-        // Construct ToolUseBlockParam properly
-        assistantContent.push({
-          type: 'tool_use' as const,
-          id: tc.id,
-          name: tc.name,
-          input: parsedInput,
-        } as Anthropic.ToolUseBlockParam);
-      }
-
-      // Store with proper typing - MessageParam accepts content as ContentBlockParam[]
-      messages.push({
-        role: 'assistant' as const,
-        content: assistantContent,
-      });
-
-      logger.info('Stored assistant message with tool_use blocks', {
-        sessionId,
-        textLength: fullContent.length,
-        toolUseCount: toolCalls.length,
-        toolUseIds: toolCalls.map(t => t.id),
-      });
+    if (toolCalls.length > 0) {
+      assistantMessage.tool_calls = toolCalls;
     }
+
+    messages.push(assistantMessage);
     conversationHistory.set(sessionId, messages);
+
+    logger.info('Stored conversation in OpenAI format', {
+      sessionId,
+      messageCount: messages.length,
+      hasToolCalls: toolCalls.length > 0,
+      toolCallIds: toolCalls.map(t => t.id),
+    });
 
     // Calculate cost
     const pricing = getModelPricing(model);
@@ -922,7 +941,7 @@ Then mark first task as in_progress before working on it.
       model,
       stopReason: toolCalls.length > 0 ? 'tool_use' : 'end_turn',
       needsToolExecution: toolCalls.length > 0,
-      pendingTools: toolCalls.map(t => ({ id: t.id, name: t.name })),
+      pendingTools: toolCalls.map(t => ({ id: t.id, name: t.function.name })),
       tokensInput: totalTokensInput,
       tokensOutput: totalTokensOutput,
       costUsd,
@@ -966,8 +985,7 @@ Then mark first task as in_progress before working on it.
 
 /**
  * Submit tool results from client and continue the conversation
- * Uses Anthropic SDK directly with Anthropic format messages
- * This avoids OpenAI<->Anthropic format conversion issues
+ * Uses OpenAI-compatible format consistently with runChatStreaming
  */
 export const submitToolResults = async (
   sessionId: string,
@@ -996,7 +1014,7 @@ export const submitToolResults = async (
       logger.error('Session not found', { sessionId, availableSessions: Array.from(conversationHistory.keys()) });
       res.write(`data: ${JSON.stringify({
         type: 'error',
-        content: `Session not found: ${sessionId}`,
+        content: `Session not found: ${sessionId}. Please start a new session with /new`,
       })}\n\n`);
       res.end();
       return;
@@ -1015,161 +1033,251 @@ export const submitToolResults = async (
       messageCount: messages.length,
     });
 
-    // Log full message structure for debugging
-    for (let i = 0; i < messages.length; i++) {
-      const msg = messages[i];
-      if (Array.isArray(msg.content)) {
-        const blockTypes = msg.content.map(b => {
-          if (typeof b === 'object' && 'type' in b) {
-            if (b.type === 'tool_use') {
-              return `tool_use(id=${(b as { id: string }).id})`;
-            }
-            if (b.type === 'tool_result') {
-              return `tool_result(tool_use_id=${(b as { tool_use_id: string }).tool_use_id})`;
-            }
-            return b.type;
-          }
-          return typeof b;
-        });
-        logger.info(`Message[${i}]`, { role: msg.role, blockTypes });
-      } else {
-        logger.info(`Message[${i}]`, { role: msg.role, contentType: typeof msg.content });
-      }
-    }
-
-    // Find the last assistant message to verify tool_use blocks exist
+    // Find the last assistant message to verify tool_calls exist
     const lastAssistantMsg = [...messages].reverse().find(m => m.role === 'assistant');
-    const storedToolUseIds: string[] = [];
+    const storedToolCallIds: string[] = [];
 
-    if (lastAssistantMsg && Array.isArray(lastAssistantMsg.content)) {
-      for (const block of lastAssistantMsg.content) {
-        if (typeof block === 'object' && 'type' in block && block.type === 'tool_use') {
-          storedToolUseIds.push((block as { id: string }).id);
-        }
+    if (lastAssistantMsg?.tool_calls) {
+      for (const tc of lastAssistantMsg.tool_calls) {
+        storedToolCallIds.push(tc.id);
       }
     }
 
-    logger.info('Tool use ID comparison', {
-      storedToolUseIds,
+    logger.info('Tool call ID comparison', {
+      storedToolCallIds,
       submittedToolUseIds: toolResults.map(r => r.tool_use_id),
-      match: storedToolUseIds.length > 0 && toolResults.every(r => storedToolUseIds.includes(r.tool_use_id)),
+      match: storedToolCallIds.length > 0 && toolResults.every(r => storedToolCallIds.includes(r.tool_use_id)),
     });
 
-    // CRITICAL: Verify tool_use blocks exist before proceeding
-    if (storedToolUseIds.length === 0) {
-      logger.error('NO TOOL_USE BLOCKS FOUND - This is the bug!', {
+    // Verify tool_calls exist
+    if (storedToolCallIds.length === 0) {
+      logger.error('NO TOOL_CALLS FOUND in last assistant message', {
         sessionId,
-        lastAssistantMsgRole: lastAssistantMsg?.role,
-        lastAssistantMsgContent: lastAssistantMsg?.content,
+        lastAssistantMsg,
+        allMessages: messages.map((m, i) => ({
+          index: i,
+          role: m.role,
+          hasToolCalls: !!(m as OpenAIMessage).tool_calls?.length,
+          toolCallIds: (m as OpenAIMessage).tool_calls?.map(tc => tc.id),
+        })),
       });
       res.write(`data: ${JSON.stringify({
         type: 'error',
-        content: 'Internal error: No tool_use blocks found in conversation history. Please start a new session with /new',
+        content: 'Internal error: No tool_calls found in conversation history. Please start a new session with /new',
       })}\n\n`);
       res.end();
       return;
     }
 
-    // Check for mismatched IDs
-    const missingIds = toolResults.filter(r => !storedToolUseIds.includes(r.tool_use_id));
-    if (missingIds.length > 0) {
-      logger.error('Tool use ID mismatch detected', {
-        missingIds: missingIds.map(r => r.tool_use_id),
-        storedIds: storedToolUseIds,
+    // Add tool results as 'tool' role messages (OpenAI format)
+    for (const result of toolResults) {
+      messages.push({
+        role: 'tool',
+        tool_call_id: result.tool_use_id,
+        content: result.output,
       });
     }
 
-    // Build system prompt with TodoWrite instructions
-    const systemPrompt = options.systemPrompt || options.appendSystemPrompt ||
-      `You are Claude, an AI coding assistant. You have access to tools to read, write, and edit files, and run bash commands.
-Current working directory: ${workspacePath}
+    logger.info('Added tool results to messages', {
+      newMessageCount: messages.length,
+      toolResultIds: toolResults.map(r => r.tool_use_id),
+    });
 
-## CRITICAL: Task Planning with TodoWrite
+    const systemPrompt = buildSystemPrompt(workspacePath, options.systemPrompt || options.appendSystemPrompt);
 
-For ANY task that requires 2 or more steps, you MUST use the TodoWrite tool FIRST before doing anything else.
+    // Build request body - same format as runChatStreaming
+    const requestBody: Record<string, unknown> = {
+      model,
+      messages: [
+        { role: 'system', content: systemPrompt },
+        ...messages,
+      ],
+      max_tokens: maxTokens,
+      stream: true,
+      tools: getOpenAITools(),
+    };
 
-## File Operations
-- Always use the Write tool to create new files.
-- Always use the Edit tool to modify existing files.
-- Always use the Read tool to view file contents.
-- Always use the Bash tool to run shell commands.`;
-
-    // Add tool results to messages in Anthropic format
-    const toolResultBlocks: Anthropic.ToolResultBlockParam[] = toolResults.map(r => ({
-      type: 'tool_result' as const,
-      tool_use_id: r.tool_use_id,
-      content: r.output,
-      is_error: r.is_error,
-    }));
-
-    messages.push({ role: 'user', content: toolResultBlocks });
-
-    logger.info('Calling Anthropic API via SDK', {
+    logger.info('Sending tool results request to OpenRouter', {
+      url: `${openRouterConfig.baseUrl}/v1/chat/completions`,
       model,
       messageCount: messages.length,
-      toolResultCount: toolResultBlocks.length,
     });
 
-    // Use Anthropic SDK directly - no format conversion needed
-    // The messages are already in Anthropic format
-    const response = await client.messages.create({
-      model,
-      max_tokens: maxTokens,
-      system: systemPrompt,
-      messages: messages as Anthropic.MessageParam[],
-      tools: toolDefinitions as Anthropic.Tool[],
+    // Use fetch with OpenAI format - same as runChatStreaming
+    const streamResponse = await fetch(`${openRouterConfig.baseUrl}/v1/chat/completions`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${openRouterConfig.authToken}`,
+        'HTTP-Referer': 'https://openanalyst.ai',
+        'X-Title': 'OpenAnalyst',
+      },
+      body: JSON.stringify(requestBody),
     });
 
-    logger.info('Anthropic API response received', {
-      stopReason: response.stop_reason,
-      contentBlocks: response.content.length,
-      usage: response.usage,
-    });
+    if (!streamResponse.ok) {
+      const errorText = await streamResponse.text();
+      logger.error('Tool results API error from OpenRouter', {
+        status: streamResponse.status,
+        statusText: streamResponse.statusText,
+        error: errorText,
+        requestMessages: messages.slice(-3), // Last 3 messages for debugging
+      });
+      throw new Error(`OpenRouter API error: ${streamResponse.status} - ${errorText}`);
+    }
 
-    // Process response content blocks
-    const toolUseBlocks: Anthropic.ToolUseBlock[] = [];
+    const reader = streamResponse.body?.getReader();
+    if (!reader) {
+      throw new Error('No response body from OpenRouter');
+    }
 
-    for (const block of response.content) {
-      if (aborted) break;
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let fullContent = '';
+    const newToolCalls: OpenAIToolCall[] = [];
+    let currentToolCall: { id: string; name: string; arguments: string } | null = null;
+    let totalTokensInput = 0;
+    let totalTokensOutput = 0;
 
-      if (block.type === 'text' && block.text) {
-        res.write(`data: ${JSON.stringify({
-          type: 'text',
-          content: block.text,
-        })}\n\n`);
-      } else if (block.type === 'tool_use') {
-        toolUseBlocks.push(block);
-        res.write(`data: ${JSON.stringify({
-          type: 'tool_use',
-          tool: block.name,
-          input: block.input,
-          tool_use_id: block.id,
-          execute_locally: true,
-        })}\n\n`);
+    // Process stream
+    while (!aborted) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+
+      for (const line of lines) {
+        if (aborted) break;
+
+        const trimmedLine = line.trim();
+        if (!trimmedLine || !trimmedLine.startsWith('data: ')) continue;
+
+        const data = trimmedLine.slice(6).trim();
+        if (data === '[DONE]') continue;
+
+        try {
+          const parsed = JSON.parse(data);
+          const choice = parsed.choices?.[0];
+          if (!choice) continue;
+
+          const delta = choice.delta;
+
+          // Handle text content
+          if (delta?.content) {
+            fullContent += delta.content;
+            res.write(`data: ${JSON.stringify({
+              type: 'text',
+              content: delta.content,
+            })}\n\n`);
+          }
+
+          // Handle tool calls
+          if (delta?.tool_calls) {
+            for (const tc of delta.tool_calls) {
+              if (tc.index !== undefined) {
+                if (tc.id) {
+                  if (currentToolCall) {
+                    newToolCalls.push({
+                      id: currentToolCall.id,
+                      type: 'function',
+                      function: {
+                        name: currentToolCall.name,
+                        arguments: currentToolCall.arguments,
+                      },
+                    });
+                  }
+                  currentToolCall = {
+                    id: tc.id,
+                    name: tc.function?.name || '',
+                    arguments: tc.function?.arguments || '',
+                  };
+
+                  res.write(`data: ${JSON.stringify({
+                    type: 'tool_start',
+                    tool: currentToolCall.name,
+                    tool_use_id: currentToolCall.id,
+                  })}\n\n`);
+                } else if (currentToolCall) {
+                  if (tc.function?.name) currentToolCall.name = tc.function.name;
+                  if (tc.function?.arguments) currentToolCall.arguments += tc.function.arguments;
+                }
+              }
+            }
+          }
+
+          // Track usage
+          if (parsed.usage) {
+            totalTokensInput = parsed.usage.prompt_tokens || 0;
+            totalTokensOutput = parsed.usage.completion_tokens || 0;
+          }
+        } catch {
+          // Skip parse errors
+        }
       }
     }
 
-    // Update conversation history with the response
-    messages.push({ role: 'assistant', content: response.content });
+    // Push last tool call
+    if (currentToolCall) {
+      newToolCalls.push({
+        id: currentToolCall.id,
+        type: 'function',
+        function: {
+          name: currentToolCall.name,
+          arguments: currentToolCall.arguments,
+        },
+      });
+    }
+
+    // Send new tool calls to client
+    for (const tc of newToolCalls) {
+      let parsedInput = {};
+      try {
+        parsedInput = JSON.parse(tc.function.arguments || '{}');
+      } catch {
+        parsedInput = {};
+      }
+
+      res.write(`data: ${JSON.stringify({
+        type: 'tool_use',
+        tool: tc.function.name,
+        input: parsedInput,
+        tool_use_id: tc.id,
+        execute_locally: true,
+      })}\n\n`);
+    }
+
+    // Store updated conversation
+    const assistantMessage: OpenAIMessage = {
+      role: 'assistant',
+      content: fullContent || null,
+    };
+
+    if (newToolCalls.length > 0) {
+      assistantMessage.tool_calls = newToolCalls;
+    }
+
+    messages.push(assistantMessage);
     conversationHistory.set(sessionId, messages);
 
-    logger.info('Updated conversation history', {
+    logger.info('=== SUBMIT TOOL RESULTS COMPLETE ===', {
       sessionId,
       newMessageCount: messages.length,
-      newToolUseCount: toolUseBlocks.length,
-      newToolUseIds: toolUseBlocks.map(t => t.id),
+      hasNewToolCalls: newToolCalls.length > 0,
+      newToolCallIds: newToolCalls.map(t => t.id),
     });
 
     // Calculate cost
     const pricing = getModelPricing(model);
-    const costUsd = (response.usage.input_tokens / 1_000_000) * pricing.input +
-                    (response.usage.output_tokens / 1_000_000) * pricing.output;
+    const costUsd = (totalTokensInput / 1_000_000) * pricing.input +
+                    (totalTokensOutput / 1_000_000) * pricing.output;
 
     // Send usage info
     res.write(`data: ${JSON.stringify({
       type: 'usage',
-      tokensInput: response.usage.input_tokens,
-      tokensOutput: response.usage.output_tokens,
+      tokensInput: totalTokensInput,
+      tokensOutput: totalTokensOutput,
       costUsd,
     })}\n\n`);
 
@@ -1178,33 +1286,26 @@ For ANY task that requires 2 or more steps, you MUST use the TodoWrite tool FIRS
       type: 'turn_complete',
       sessionId,
       model,
-      stopReason: response.stop_reason,
-      needsToolExecution: response.stop_reason === 'tool_use' && toolUseBlocks.length > 0,
-      pendingTools: toolUseBlocks.map(t => ({ id: t.id, name: t.name })),
-      tokensInput: response.usage.input_tokens,
-      tokensOutput: response.usage.output_tokens,
+      stopReason: newToolCalls.length > 0 ? 'tool_use' : 'end_turn',
+      needsToolExecution: newToolCalls.length > 0,
+      pendingTools: newToolCalls.map(t => ({ id: t.id, name: t.function.name })),
+      tokensInput: totalTokensInput,
+      tokensOutput: totalTokensOutput,
       costUsd,
     })}\n\n`);
 
-    logger.info('=== SUBMIT TOOL RESULTS COMPLETE ===', {
-      sessionId,
-      stopReason: response.stop_reason,
-      newToolsRequested: toolUseBlocks.length,
-    });
-
   } catch (error) {
     const errorMessage = (error as Error).message;
-    const errorStack = (error as Error).stack;
     logger.error('Tool results processing error', {
       error: errorMessage,
-      stack: errorStack,
+      stack: (error as Error).stack,
       sessionId,
     });
 
     if (!aborted) {
       res.write(`data: ${JSON.stringify({
         type: 'error',
-        content: (error as Error).message,
+        content: errorMessage,
       })}\n\n`);
     }
   } finally {
