@@ -50,6 +50,12 @@ app.use(morgan('combined', {
   },
 }));
 
+// DEBUG: Log ALL incoming requests (before any processing)
+app.use((req: Request, _res: Response, next: NextFunction) => {
+  console.log(`[INCOMING] ${req.method} ${req.path} from ${req.ip || req.socket.remoteAddress}`);
+  next();
+});
+
 // Body parsing
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));

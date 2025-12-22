@@ -61,6 +61,9 @@ const apiRequest = async (
   const url = `${getApiUrl()}${endpoint}`;
   const token = getToken();
 
+  // DEBUG: Log the request
+  console.log(chalk.gray(`\n[DEBUG] Request: ${options.method || 'GET'} ${url}`));
+
   const response = await fetch(url, {
     method: options.method || 'GET',
     headers: {
@@ -69,6 +72,9 @@ const apiRequest = async (
     },
     body: options.body ? JSON.stringify(options.body) : undefined,
   });
+
+  // DEBUG: Log the response
+  console.log(chalk.gray(`[DEBUG] Response: ${response.status} ${response.statusText}`));
 
   if (!options.stream) {
     const data = await response.json() as ApiResponse;
@@ -80,6 +86,7 @@ const apiRequest = async (
     let errorMessage = `HTTP ${response.status}: ${response.statusText}`;
     try {
       const errorData = await response.json() as ApiResponse;
+      console.log(chalk.gray(`[DEBUG] Error Response: ${JSON.stringify(errorData)}`));
       if (errorData.error?.message) {
         errorMessage = errorData.error.message;
       }

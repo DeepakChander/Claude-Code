@@ -50,7 +50,17 @@ class WebSocketService {
    * Initialize WebSocket server on the HTTP server
    */
   initialize(server: Server): void {
-    this.wss = new WebSocketServer({ server, path: '/ws' });
+    this.wss = new WebSocketServer({
+      server,
+      path: '/ws',
+      perMessageDeflate: false, // Disable compression to avoid overhead
+    });
+
+    // Log WebSocket upgrade attempts for debugging
+    server.on('upgrade', (request, _socket, _head) => {
+      const url = request.url || '/';
+      console.log(`[WS UPGRADE] Upgrade request for path: ${url}`);
+    });
 
     this.wss.on('connection', (ws, req) => {
       const clientId = this.generateClientId();
@@ -150,7 +160,7 @@ class WebSocketService {
     this.clients.forEach((client, clientId) => {
       // Send to clients subscribed to this session or clients without session filter
       if ((client.sessionId === sessionId || !client.sessionId) &&
-          client.ws.readyState === WebSocket.OPEN) {
+        client.ws.readyState === WebSocket.OPEN) {
         try {
           client.ws.send(message);
           sentCount++;
