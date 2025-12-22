@@ -966,6 +966,7 @@ Then mark first task as in_progress before working on it.
 
 /**
  * Submit tool results from client and continue the conversation
+ * Uses OpenAI-style format via fetch for consistency with runChatStreaming
  */
 export const submitToolResults = async (
   sessionId: string,
@@ -999,8 +1000,8 @@ export const submitToolResults = async (
       return;
     }
 
-    // Make a copy and validate to prevent tool_use_id mismatch errors
-    messages = validateConversationHistory([...messages]);
+    // Make a copy
+    messages = [...messages];
 
     const model = options.model || openRouterConfig.defaultModel;
     const maxTokens = options.maxTokens || 8192;
@@ -1009,185 +1010,367 @@ export const submitToolResults = async (
       sessionId,
       toolCount: toolResults.length,
       submittedToolUseIds: toolResults.map(r => r.tool_use_id),
+      messageCount: messages.length,
     });
 
-    // Validate that tool_use_ids have matching tool_use blocks in the last assistant message
+    // Find the last assistant message to get tool_use info
     const lastAssistantMsg = [...messages].reverse().find(m => m.role === 'assistant');
-    const validToolUseIds = new Set<string>();
+    const storedToolCalls: Array<{ id: string; name: string; input: Record<string, unknown> }> = [];
 
     if (lastAssistantMsg && Array.isArray(lastAssistantMsg.content)) {
       for (const block of lastAssistantMsg.content) {
         if (typeof block === 'object' && 'type' in block && block.type === 'tool_use') {
-          validToolUseIds.add((block as Anthropic.ToolUseBlock).id);
+          const toolUseBlock = block as { id: string; name: string; input: Record<string, unknown> };
+          storedToolCalls.push({
+            id: toolUseBlock.id,
+            name: toolUseBlock.name,
+            input: toolUseBlock.input,
+          });
         }
       }
-      logger.info('Found tool_use blocks in last assistant message', {
-        storedToolUseIds: Array.from(validToolUseIds),
-        lastMessageContentTypes: lastAssistantMsg.content.map(b =>
-          typeof b === 'object' && 'type' in b ? b.type : typeof b
-        ),
+      logger.info('Found stored tool_use blocks', {
+        storedToolUseIds: storedToolCalls.map(t => t.id),
+        storedToolNames: storedToolCalls.map(t => t.name),
       });
     } else {
-      logger.warn('No valid assistant message with content array found', {
+      logger.warn('No tool_use blocks found in last assistant message', {
         lastAssistantMsgRole: lastAssistantMsg?.role,
         contentType: lastAssistantMsg ? typeof lastAssistantMsg.content : 'undefined',
+        contentIsArray: lastAssistantMsg ? Array.isArray(lastAssistantMsg.content) : false,
       });
     }
 
-    // Filter tool results to only include those with valid matching tool_use
-    const validToolResults = toolResults.filter(r => {
-      if (validToolUseIds.has(r.tool_use_id)) {
-        return true;
+    // Build system prompt with TodoWrite instructions
+    const systemPrompt = options.systemPrompt || options.appendSystemPrompt ||
+      `You are Claude, an AI coding assistant. You have access to tools to read, write, and edit files, and run bash commands.
+Current working directory: ${workspacePath}
+
+## CRITICAL: Task Planning with TodoWrite
+
+For ANY task that requires 2 or more steps, you MUST use the TodoWrite tool FIRST before doing anything else.
+
+**TodoWrite Usage:**
+1. BEFORE starting work, create a complete task list using TodoWrite
+2. Each todo item needs: content (what to do), activeForm (present continuous form), status (start as 'pending')
+3. Update the todo list as you work: mark current task as 'in_progress', completed tasks as 'completed'
+4. Call TodoWrite again whenever a task status changes
+
+## File Operations
+- Always use the Write tool to create new files.
+- Always use the Edit tool to modify existing files.
+- Always use the Read tool to view file contents.
+- Always use the Bash tool to run shell commands.`;
+
+    // Convert messages to OpenAI format for consistency with runChatStreaming
+    const openAIMessages: Array<{ role: string; content: string; tool_calls?: unknown[]; tool_call_id?: string; name?: string }> = [
+      { role: 'system', content: systemPrompt },
+    ];
+
+    // Convert each message to OpenAI format
+    for (const msg of messages) {
+      if (msg.role === 'user') {
+        if (typeof msg.content === 'string') {
+          openAIMessages.push({ role: 'user', content: msg.content });
+        } else if (Array.isArray(msg.content)) {
+          // Check if this is tool_result content
+          const toolResultBlocks = msg.content.filter(
+            (b): b is Anthropic.ToolResultBlockParam =>
+              typeof b === 'object' && 'type' in b && b.type === 'tool_result'
+          );
+          if (toolResultBlocks.length > 0) {
+            // Convert tool_results to OpenAI tool messages
+            for (const tr of toolResultBlocks) {
+              openAIMessages.push({
+                role: 'tool',
+                content: typeof tr.content === 'string' ? tr.content : JSON.stringify(tr.content),
+                tool_call_id: tr.tool_use_id,
+              });
+            }
+          } else {
+            // Regular user message with blocks
+            const textContent = msg.content
+              .filter((b): b is Anthropic.TextBlockParam => typeof b === 'object' && 'type' in b && b.type === 'text')
+              .map(b => b.text)
+              .join('\n');
+            if (textContent) {
+              openAIMessages.push({ role: 'user', content: textContent });
+            }
+          }
+        }
+      } else if (msg.role === 'assistant') {
+        if (typeof msg.content === 'string') {
+          openAIMessages.push({ role: 'assistant', content: msg.content });
+        } else if (Array.isArray(msg.content)) {
+          // Extract text and tool_use blocks
+          const textBlocks = msg.content.filter(
+            (b): b is Anthropic.TextBlockParam => typeof b === 'object' && 'type' in b && b.type === 'text'
+          );
+          const toolUseBlocks = msg.content.filter(
+            (b): b is { type: 'tool_use'; id: string; name: string; input: Record<string, unknown> } =>
+              typeof b === 'object' && 'type' in b && b.type === 'tool_use'
+          );
+
+          const assistantMsg: { role: string; content: string; tool_calls?: unknown[] } = {
+            role: 'assistant',
+            content: textBlocks.map(b => b.text).join('\n') || '',
+          };
+
+          // Convert tool_use to OpenAI tool_calls format
+          if (toolUseBlocks.length > 0) {
+            assistantMsg.tool_calls = toolUseBlocks.map((tu, index) => ({
+              id: tu.id,
+              type: 'function',
+              index,
+              function: {
+                name: tu.name,
+                arguments: JSON.stringify(tu.input),
+              },
+            }));
+          }
+
+          openAIMessages.push(assistantMsg);
+        }
       }
-      logger.warn('Skipping tool result with no matching tool_use', {
-        tool_use_id: r.tool_use_id,
-        validIds: Array.from(validToolUseIds),
+    }
+
+    // Add the new tool results as tool messages
+    for (const tr of toolResults) {
+      openAIMessages.push({
+        role: 'tool',
+        content: tr.output,
+        tool_call_id: tr.tool_use_id,
       });
-      return false;
+    }
+
+    logger.info('Converted to OpenAI format', {
+      messageCount: openAIMessages.length,
+      messageRoles: openAIMessages.map(m => m.role),
     });
 
-    if (validToolResults.length === 0) {
-      logger.error('No valid tool results to process - tool_use_id mismatch', {
-        sessionId,
-        submittedIds: toolResults.map(r => r.tool_use_id),
-        validIds: Array.from(validToolUseIds),
-        messageCount: messages.length,
+    // Build request body in OpenAI format
+    const requestBody: Record<string, unknown> = {
+      model,
+      messages: openAIMessages,
+      max_tokens: maxTokens,
+      stream: true,
+      tools: toolDefinitions.map(t => ({
+        type: 'function',
+        function: {
+          name: t.name,
+          description: t.description,
+          parameters: t.input_schema,
+        },
+      })),
+    };
+
+    // Send request using fetch (same as runChatStreaming)
+    const streamResponse = await fetch(`${openRouterConfig.baseUrl}/v1/chat/completions`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${openRouterConfig.authToken}`,
+        'HTTP-Referer': 'https://openanalyst.ai',
+        'X-Title': 'OpenAnalyst',
+      },
+      body: JSON.stringify(requestBody),
+    });
+
+    if (!streamResponse.ok) {
+      const errorText = await streamResponse.text();
+      logger.error('Tool results API error', {
+        status: streamResponse.status,
+        error: errorText,
       });
       res.write(`data: ${JSON.stringify({
         type: 'error',
-        content: `No valid tool results found - submitted IDs [${toolResults.map(r => r.tool_use_id).join(', ')}] do not match stored IDs [${Array.from(validToolUseIds).join(', ')}]`,
+        content: `API error: ${streamResponse.status} - ${errorText}`,
       })}\n\n`);
       res.end();
       return;
     }
 
-    // Add tool results to messages
-    const toolResultBlocks: Anthropic.ToolResultBlockParam[] = validToolResults.map(r => ({
+    const reader = streamResponse.body?.getReader();
+    if (!reader) {
+      throw new Error('No response body');
+    }
+
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let fullContent = '';
+    const toolCalls: Array<{ id: string; name: string; arguments: string }> = [];
+    let currentToolCall: { id: string; name: string; arguments: string } | null = null;
+    let totalTokensInput = 0;
+    let totalTokensOutput = 0;
+
+    // Process stream
+    while (!aborted) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+
+      for (const line of lines) {
+        if (aborted) break;
+
+        const trimmedLine = line.trim();
+        if (!trimmedLine || !trimmedLine.startsWith('data: ')) continue;
+
+        const data = trimmedLine.slice(6).trim();
+        if (data === '[DONE]') continue;
+
+        try {
+          const parsed = JSON.parse(data);
+          const choice = parsed.choices?.[0];
+          if (!choice) continue;
+
+          const delta = choice.delta;
+
+          // Handle text content
+          if (delta?.content) {
+            fullContent += delta.content;
+            res.write(`data: ${JSON.stringify({
+              type: 'text',
+              content: delta.content,
+            })}\n\n`);
+          }
+
+          // Handle tool calls
+          if (delta?.tool_calls) {
+            for (const tc of delta.tool_calls) {
+              if (tc.id) {
+                if (currentToolCall) {
+                  toolCalls.push(currentToolCall);
+                }
+                currentToolCall = {
+                  id: tc.id,
+                  name: tc.function?.name || '',
+                  arguments: tc.function?.arguments || '',
+                };
+                res.write(`data: ${JSON.stringify({
+                  type: 'tool_start',
+                  tool: currentToolCall.name,
+                  tool_use_id: currentToolCall.id,
+                })}\n\n`);
+              } else if (currentToolCall) {
+                if (tc.function?.name) {
+                  currentToolCall.name = tc.function.name;
+                }
+                if (tc.function?.arguments) {
+                  currentToolCall.arguments += tc.function.arguments;
+                }
+              }
+            }
+          }
+
+          // Track usage
+          if (parsed.usage) {
+            totalTokensInput = parsed.usage.prompt_tokens || 0;
+            totalTokensOutput = parsed.usage.completion_tokens || 0;
+          }
+        } catch {
+          // Ignore parse errors
+        }
+      }
+    }
+
+    // Push last tool call
+    if (currentToolCall) {
+      toolCalls.push(currentToolCall);
+    }
+
+    // Send tool_use events to client
+    for (const tc of toolCalls) {
+      let parsedInput = {};
+      try {
+        parsedInput = JSON.parse(tc.arguments || '{}');
+      } catch {
+        parsedInput = {};
+      }
+
+      res.write(`data: ${JSON.stringify({
+        type: 'tool_use',
+        tool: tc.name,
+        input: parsedInput,
+        tool_use_id: tc.id,
+        execute_locally: true,
+      })}\n\n`);
+    }
+
+    // Update conversation history with tool results and new response
+    // First add the tool results we received
+    const toolResultBlocks: Anthropic.ToolResultBlockParam[] = toolResults.map(r => ({
       type: 'tool_result',
       tool_use_id: r.tool_use_id,
       content: r.output,
       is_error: r.is_error,
     }));
-
     messages.push({ role: 'user', content: toolResultBlocks });
 
-    // Build system prompt
-    const systemPrompt = options.systemPrompt || options.appendSystemPrompt ||
-      `You are Claude, an AI coding assistant. You have access to tools to read, write, and edit files, and run bash commands.
-Current working directory: ${workspacePath}
+    // Then add the assistant response
+    if (fullContent || toolCalls.length > 0) {
+      const assistantContent: Anthropic.ContentBlockParam[] = [];
 
-When the user asks you to create, modify, or interact with files, use the available tools.`;
-
-    // Build request options with reasoning support
-    const requestOptions: Anthropic.MessageCreateParamsNonStreaming = {
-      model,
-      max_tokens: maxTokens,
-      system: systemPrompt,
-      messages,
-      tools: toolDefinitions as Anthropic.Tool[],
-    };
-
-    // Enable reasoning for DeepSeek models
-    if (supportsReasoning(model)) {
-      (requestOptions as unknown as Record<string, unknown>)['reasoning'] = {
-        effort: 'high',
-        exclude: false,
-      };
-    }
-
-    // Get response
-    const response = await client.messages.create(requestOptions);
-
-    // Process response
-    const toolUseBlocks: Anthropic.ToolUseBlock[] = [];
-    let reasoningContent = '';
-
-    // Check for reasoning field on the response (OpenRouter format)
-    const rawResponse = response as unknown as Record<string, unknown>;
-    if (rawResponse.reasoning) {
-      reasoningContent = rawResponse.reasoning as string;
-      logger.info('Found reasoning in tool response', { length: reasoningContent.length });
-
-      res.write(`data: ${JSON.stringify({
-        type: 'thinking',
-        content: reasoningContent,
-      })}\n\n`);
-    }
-
-    for (const block of response.content) {
-      if (aborted) break;
-
-      if (block.type === 'thinking') {
-        // DeepSeek reasoning/thinking block (Anthropic format)
-        const thinkingBlock = block as unknown as { type: 'thinking'; thinking: string };
-        reasoningContent += thinkingBlock.thinking;
-
-        res.write(`data: ${JSON.stringify({
-          type: 'thinking',
-          content: thinkingBlock.thinking,
-        })}\n\n`);
-      } else if ((block as unknown as Record<string, unknown>).reasoning) {
-        const blockReasoning = (block as unknown as Record<string, unknown>).reasoning as string;
-        reasoningContent += blockReasoning;
-
-        res.write(`data: ${JSON.stringify({
-          type: 'thinking',
-          content: blockReasoning,
-        })}\n\n`);
-      } else if (block.type === 'text' && block.text) {
-        res.write(`data: ${JSON.stringify({
-          type: 'text',
-          content: block.text,
-        })}\n\n`);
-      } else if (block.type === 'tool_use') {
-        toolUseBlocks.push(block);
-
-        res.write(`data: ${JSON.stringify({
-          type: 'tool_use',
-          tool: block.name,
-          input: block.input,
-          tool_use_id: block.id,
-          execute_locally: true,
-        })}\n\n`);
+      if (fullContent) {
+        assistantContent.push({ type: 'text' as const, text: fullContent });
       }
+
+      for (const tc of toolCalls) {
+        let parsedInput: Record<string, unknown> = {};
+        try {
+          parsedInput = JSON.parse(tc.arguments || '{}');
+        } catch {
+          parsedInput = {};
+        }
+        assistantContent.push({
+          type: 'tool_use' as const,
+          id: tc.id,
+          name: tc.name,
+          input: parsedInput,
+        } as Anthropic.ToolUseBlockParam);
+      }
+
+      messages.push({ role: 'assistant' as const, content: assistantContent });
+
+      logger.info('Stored tool response with tool_use blocks', {
+        sessionId,
+        textLength: fullContent.length,
+        toolUseCount: toolCalls.length,
+        toolUseIds: toolCalls.map(t => t.id),
+      });
     }
 
-    // Update conversation history
-    messages.push({ role: 'assistant', content: response.content });
     conversationHistory.set(sessionId, messages);
 
     // Calculate cost
     const pricing = getModelPricing(model);
-    const costUsd = (response.usage.input_tokens / 1_000_000) * pricing.input +
-                    (response.usage.output_tokens / 1_000_000) * pricing.output;
+    const costUsd = (totalTokensInput / 1_000_000) * pricing.input +
+                    (totalTokensOutput / 1_000_000) * pricing.output;
 
-    const needsToolExecution = response.stop_reason === 'tool_use' && toolUseBlocks.length > 0;
-
+    // Send usage and completion events
     res.write(`data: ${JSON.stringify({
       type: 'usage',
-      tokensInput: response.usage.input_tokens,
-      tokensOutput: response.usage.output_tokens,
+      tokensInput: totalTokensInput,
+      tokensOutput: totalTokensOutput,
       costUsd,
-      reasoningContent: reasoningContent || undefined,
     })}\n\n`);
 
     res.write(`data: ${JSON.stringify({
       type: 'turn_complete',
       sessionId,
       model,
-      stopReason: response.stop_reason,
-      needsToolExecution,
-      pendingTools: toolUseBlocks.map(t => ({ id: t.id, name: t.name })),
-      tokensInput: response.usage.input_tokens,
-      tokensOutput: response.usage.output_tokens,
+      stopReason: toolCalls.length > 0 ? 'tool_use' : 'end_turn',
+      needsToolExecution: toolCalls.length > 0,
+      pendingTools: toolCalls.map(t => ({ id: t.id, name: t.name })),
+      tokensInput: totalTokensInput,
+      tokensOutput: totalTokensOutput,
       costUsd,
-      reasoningContent: reasoningContent || undefined,
     })}\n\n`);
 
-    logger.info('Tool results processed', {
+    logger.info('Tool results processed successfully', {
       sessionId,
-      stopReason: response.stop_reason,
-      newToolsRequested: toolUseBlocks.length,
+      newToolCalls: toolCalls.length,
     });
 
   } catch (error) {
