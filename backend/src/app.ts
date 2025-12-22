@@ -14,6 +14,7 @@ import kafkaProducer from './services/kafka-producer.service';
 import kafkaConsumer from './services/kafka-consumer.service';
 import responseHandler from './services/response-handler.service';
 import { isKafkaConfigured } from './config/kafka';
+import { wsService } from './services/websocket.service';
 
 // Load environment variables
 config();
@@ -76,6 +77,7 @@ app.get('/health', async (_req: Request, res: Response) => {
     const kafkaConfigured = isKafkaConfigured();
     const kafkaProducerConnected = kafkaProducer.isConnected();
     const kafkaConsumerRunning = kafkaConsumer.isRunning();
+    const wsClientCount = wsService.getClientCount();
 
     const status = mongoConnected ? 'ok' : 'degraded';
 
@@ -94,10 +96,16 @@ app.get('/health', async (_req: Request, res: Response) => {
         producer: kafkaProducerConnected ? 'connected' : 'disconnected',
         consumer: kafkaConsumerRunning ? 'running' : 'stopped',
       },
+      websocket: {
+        enabled: true,
+        path: '/ws',
+        connectedClients: wsClientCount,
+      },
       features: {
         resumeConversation: true,
         offlineDelivery: true,
         messageQueue: kafkaConfigured,
+        taskProgress: true,
       },
     });
   } catch (error) {
@@ -208,8 +216,8 @@ const startServer = async () => {
       logger.info('Kafka not configured - running without message queue');
     }
 
-    // Start server
-    app.listen(parseInt(PORT as string, 10), HOST, () => {
+    // Start HTTP server
+    const server = app.listen(parseInt(PORT as string, 10), HOST, () => {
       logger.info(`OpenAnalyst API running on http://${HOST}:${PORT}`);
       logger.info(`Environment: ${NODE_ENV}`);
       console.log(`\nOpenAnalyst API running on http://${HOST}:${PORT}`);
@@ -217,8 +225,13 @@ const startServer = async () => {
       console.log(`   Database: MongoDB`);
       console.log(`   Message Queue: ${isKafkaConfigured() ? 'Kafka' : 'Not configured'}`);
       console.log(`   Health check: http://${HOST}:${PORT}/health`);
-      console.log(`   API docs: http://${HOST}:${PORT}/\n`);
+      console.log(`   API docs: http://${HOST}:${PORT}/`);
+      console.log(`   WebSocket: ws://${HOST}:${PORT}/ws\n`);
     });
+
+    // Initialize WebSocket server on the HTTP server
+    wsService.initialize(server);
+    logger.info('WebSocket server initialized on /ws path');
   } catch (error) {
     logger.error('Failed to start server', { error: (error as Error).message });
     console.error('Failed to start server:', error);
@@ -232,6 +245,10 @@ const gracefulShutdown = async (signal: string) => {
   console.log(`\n${signal} received. Shutting down gracefully...`);
 
   try {
+    // Shutdown WebSocket server
+    wsService.shutdown();
+    logger.info('WebSocket server stopped');
+
     // Stop Kafka services
     if (isKafkaConfigured()) {
       await responseHandler.stop();

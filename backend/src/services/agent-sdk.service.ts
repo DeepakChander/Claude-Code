@@ -2,7 +2,7 @@ import Anthropic from '@anthropic-ai/sdk';
 import { Response } from 'express';
 import { config } from 'dotenv';
 import logger from '../utils/logger';
-import { openRouterConfig, getModelPricing } from '../config/openrouter';
+import { openRouterConfig, getModelPricing, supportsReasoning } from '../config/openrouter';
 import { toolDefinitions, executeTool } from './tools.service';
 
 config();
@@ -34,6 +34,9 @@ export interface SdkOptions {
   maxTurns?: number;
   maxTokens?: number;
 
+  // Client-side conversation history (for resuming sessions)
+  previousMessages?: Array<{ role: 'user' | 'assistant'; content: string }>;
+
   // Advanced
   verbose?: boolean;
 }
@@ -49,6 +52,76 @@ export interface SdkResult {
 
 // Store conversation history for sessions
 const conversationHistory: Map<string, Anthropic.MessageParam[]> = new Map();
+
+/**
+ * Validate conversation history to ensure tool_result blocks have matching tool_use blocks
+ * This fixes the error: "unexpected tool_use_id found in tool_result blocks"
+ */
+const validateConversationHistory = (messages: Anthropic.MessageParam[]): Anthropic.MessageParam[] => {
+  const validated: Anthropic.MessageParam[] = [];
+
+  for (let i = 0; i < messages.length; i++) {
+    const msg = messages[i];
+
+    // Check if this is a user message with potential tool_result blocks
+    if (msg.role === 'user' && Array.isArray(msg.content)) {
+      const contentBlocks = msg.content as Anthropic.ContentBlockParam[];
+      const toolResults = contentBlocks.filter(
+        (b): b is Anthropic.ToolResultBlockParam =>
+          typeof b === 'object' && 'type' in b && b.type === 'tool_result'
+      );
+
+      if (toolResults.length > 0) {
+        // Get the previous assistant message to find matching tool_use blocks
+        const prevMsg = validated[validated.length - 1];
+
+        if (prevMsg?.role === 'assistant' && Array.isArray(prevMsg.content)) {
+          const assistantContent = prevMsg.content as Anthropic.ContentBlock[];
+          const toolUseIds = new Set(
+            assistantContent
+              .filter((b): b is Anthropic.ToolUseBlock =>
+                typeof b === 'object' && 'type' in b && b.type === 'tool_use'
+              )
+              .map(b => b.id)
+          );
+
+          // Only include tool_results with valid matching tool_use
+          const validContent = contentBlocks.filter(b => {
+            if (typeof b === 'object' && 'type' in b && b.type === 'tool_result') {
+              const toolResult = b as Anthropic.ToolResultBlockParam;
+              return toolUseIds.has(toolResult.tool_use_id);
+            }
+            return true; // Keep non-tool_result blocks
+          });
+
+          if (validContent.length > 0) {
+            validated.push({ ...msg, content: validContent });
+          }
+          // Skip message if all tool_results were invalid
+          continue;
+        }
+
+        // No valid previous assistant message with tool_use - skip orphaned tool_results
+        logger.warn('Skipping orphaned tool_result blocks (no matching tool_use)', {
+          toolResultIds: toolResults.map(t => t.tool_use_id),
+        });
+
+        // Keep any non-tool_result content
+        const nonToolContent = contentBlocks.filter(b =>
+          !(typeof b === 'object' && 'type' in b && b.type === 'tool_result')
+        );
+        if (nonToolContent.length > 0) {
+          validated.push({ ...msg, content: nonToolContent });
+        }
+        continue;
+      }
+    }
+
+    validated.push(msg);
+  }
+
+  return validated;
+};
 
 /**
  * Generate a unique session ID
@@ -99,6 +172,9 @@ export const runSdkStreaming = async (
     if (options.resume && conversationHistory.has(options.resume)) {
       messages = [...conversationHistory.get(options.resume)!];
     }
+
+    // Validate conversation history to prevent tool_use_id mismatch errors
+    messages = validateConversationHistory(messages);
 
     // Add new user message
     messages.push({ role: 'user', content: prompt });
@@ -300,6 +376,9 @@ export const runSdkSync = async (
       messages = [...conversationHistory.get(options.resume)!];
     }
 
+    // Validate conversation history to prevent tool_use_id mismatch errors
+    messages = validateConversationHistory(messages);
+
     // Add new user message
     messages.push({ role: 'user', content: prompt });
 
@@ -450,10 +529,628 @@ export const getSessionHistory = (sessionId: string): Anthropic.MessageParam[] |
   return conversationHistory.get(sessionId);
 };
 
+/**
+ * Chat mode - TRUE STREAMING with Server-Sent Events
+ * Streams tokens as they're generated for real-time display
+ * Supports DeepSeek reasoning via OpenRouter
+ */
+export const runChatStreaming = async (
+  prompt: string,
+  workspacePath: string,
+  res: Response,
+  options: SdkOptions = {}
+): Promise<void> => {
+  // Set SSE headers
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
+
+  let aborted = false;
+  const sessionId = options.resume || generateSessionId();
+  let totalTokensInput = 0;
+  let totalTokensOutput = 0;
+
+  // Handle client disconnect
+  res.on('close', () => {
+    aborted = true;
+    logger.info('Client disconnected from chat stream');
+  });
+
+  try {
+    const model = options.model || openRouterConfig.defaultModel;
+    const maxTokens = options.maxTokens || 8192;
+    const useReasoning = supportsReasoning(model);
+
+    logger.info('Running streaming chat API', {
+      workspacePath,
+      model,
+      sessionId,
+      useReasoning,
+    });
+
+    // Get or create conversation history
+    let messages: Anthropic.MessageParam[] = [];
+
+    // First try server-side session history
+    if (options.resume && conversationHistory.has(options.resume)) {
+      messages = [...conversationHistory.get(options.resume)!];
+    }
+    // Otherwise use client-provided history (for restoring from local storage)
+    else if (options.previousMessages && options.previousMessages.length > 0) {
+      messages = options.previousMessages.map(m => ({
+        role: m.role as 'user' | 'assistant',
+        content: m.content,
+      }));
+      logger.info('Restored conversation from client history', {
+        messageCount: messages.length,
+        sessionId,
+      });
+    }
+
+    // Validate conversation history to prevent tool_use_id mismatch errors
+    messages = validateConversationHistory(messages);
+
+    // Add new user message
+    messages.push({ role: 'user', content: prompt });
+
+    // Send init message immediately
+    res.write(`data: ${JSON.stringify({
+      type: 'system',
+      subtype: 'init',
+      session_id: sessionId,
+      mode: 'streaming',
+      model,
+      useReasoning,
+    })}\n\n`);
+
+    // Build system prompt
+    const systemPrompt = options.systemPrompt || options.appendSystemPrompt ||
+      `You are Claude, an AI coding assistant. You have access to tools to read, write, and edit files, and run bash commands.
+Current working directory: ${workspacePath}
+
+When the user asks you to create, modify, or interact with files, use the available tools.
+Always use the Write tool to create new files.
+Always use the Edit tool to modify existing files.
+Always use the Read tool to view file contents.
+Always use the Bash tool to run shell commands.`;
+
+    // Build OpenRouter-compatible request body
+    const requestBody: Record<string, unknown> = {
+      model,
+      messages: [
+        { role: 'system', content: systemPrompt },
+        ...messages.map(m => ({
+          role: m.role,
+          content: typeof m.content === 'string' ? m.content : JSON.stringify(m.content),
+        })),
+      ],
+      max_tokens: maxTokens,
+      stream: true,
+      // Tool definitions in OpenAI function-calling format
+      tools: toolDefinitions.map(t => ({
+        type: 'function',
+        function: {
+          name: t.name,
+          description: t.description,
+          parameters: t.input_schema,
+        },
+      })),
+    };
+
+    // For DeepSeek R1 models, add reasoning configuration
+    // OpenRouter uses "include_reasoning" parameter for DeepSeek
+    if (useReasoning) {
+      requestBody['include_reasoning'] = true;
+      logger.info('Reasoning/thinking enabled for model', { model });
+    }
+
+    logger.info('Sending streaming request to OpenRouter', {
+      url: `${openRouterConfig.baseUrl}/v1/chat/completions`,
+      model,
+      messageCount: messages.length,
+    });
+
+    // Use fetch for true streaming (OpenRouter compatible)
+    const streamResponse = await fetch(`${openRouterConfig.baseUrl}/v1/chat/completions`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${openRouterConfig.authToken}`,
+        'HTTP-Referer': 'https://openanalyst.ai',
+        'X-Title': 'OpenAnalyst',
+      },
+      body: JSON.stringify(requestBody),
+    });
+
+    if (!streamResponse.ok) {
+      const errorText = await streamResponse.text();
+      logger.error('Streaming API error from OpenRouter', {
+        status: streamResponse.status,
+        statusText: streamResponse.statusText,
+        error: errorText,
+      });
+      throw new Error(`OpenRouter API error: ${streamResponse.status} - ${errorText}`);
+    }
+
+    const reader = streamResponse.body?.getReader();
+    if (!reader) {
+      throw new Error('No response body from OpenRouter');
+    }
+
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let fullContent = '';
+    let reasoningContent = '';
+    const toolCalls: Array<{ id: string; name: string; arguments: string }> = [];
+    let currentToolCall: { id: string; name: string; arguments: string } | null = null;
+    let chunkCount = 0;
+
+    // Notify client that stream is starting
+    res.write(`data: ${JSON.stringify({
+      type: 'stream_start',
+      message: 'Receiving response...',
+    })}\n\n`);
+
+    // Process stream
+    while (!aborted) {
+      const { done, value } = await reader.read();
+      if (done) {
+        logger.info('Stream reader completed', { chunkCount });
+        break;
+      }
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+
+      for (const line of lines) {
+        if (aborted) break;
+
+        const trimmedLine = line.trim();
+        if (!trimmedLine) continue;
+        if (!trimmedLine.startsWith('data: ')) continue;
+
+        const data = trimmedLine.slice(6).trim();
+        if (data === '[DONE]') {
+          logger.info('Received [DONE] signal');
+          continue;
+        }
+
+        try {
+          const parsed = JSON.parse(data);
+          chunkCount++;
+
+          const choice = parsed.choices?.[0];
+          if (!choice) continue;
+
+          const delta = choice.delta;
+
+          // Handle reasoning/thinking content from DeepSeek
+          // OpenRouter returns reasoning in delta.reasoning or delta.reasoning_content
+          const thinking = delta?.reasoning || delta?.reasoning_content || parsed.reasoning;
+          if (thinking) {
+            reasoningContent += thinking;
+            res.write(`data: ${JSON.stringify({
+              type: 'thinking',
+              content: thinking,
+            })}\n\n`);
+          }
+
+          // Handle text content
+          if (delta?.content) {
+            fullContent += delta.content;
+            res.write(`data: ${JSON.stringify({
+              type: 'text',
+              content: delta.content,
+            })}\n\n`);
+          }
+
+          // Handle tool calls (OpenAI function calling format)
+          if (delta?.tool_calls) {
+            for (const tc of delta.tool_calls) {
+              if (tc.index !== undefined) {
+                // New tool call or continuing one
+                if (tc.id) {
+                  // New tool call starting
+                  if (currentToolCall) {
+                    toolCalls.push(currentToolCall);
+                  }
+                  currentToolCall = {
+                    id: tc.id,
+                    name: tc.function?.name || '',
+                    arguments: tc.function?.arguments || '',
+                  };
+
+                  // Notify client tool call is starting
+                  res.write(`data: ${JSON.stringify({
+                    type: 'tool_start',
+                    tool: currentToolCall.name,
+                    tool_use_id: currentToolCall.id,
+                  })}\n\n`);
+                } else if (currentToolCall) {
+                  // Continuing arguments
+                  if (tc.function?.name) {
+                    currentToolCall.name = tc.function.name;
+                  }
+                  if (tc.function?.arguments) {
+                    currentToolCall.arguments += tc.function.arguments;
+                  }
+                }
+              }
+            }
+          }
+
+          // Track usage (may come in final chunk)
+          if (parsed.usage) {
+            totalTokensInput = parsed.usage.prompt_tokens || 0;
+            totalTokensOutput = parsed.usage.completion_tokens || 0;
+          }
+
+          // Check finish reason
+          if (choice.finish_reason) {
+            logger.info('Stream finish reason received', {
+              reason: choice.finish_reason,
+              chunkCount,
+              contentLength: fullContent.length,
+              reasoningLength: reasoningContent.length,
+            });
+          }
+        } catch (parseError) {
+          // Skip non-JSON lines, log only if it looks like it should be JSON
+          if (data.startsWith('{')) {
+            logger.warn('Failed to parse SSE data', { data: data.substring(0, 100) });
+          }
+        }
+      }
+    }
+
+    // Push last tool call if exists
+    if (currentToolCall) {
+      toolCalls.push(currentToolCall);
+    }
+
+    // Send tool calls to client for execution
+    for (const tc of toolCalls) {
+      let parsedInput = {};
+      try {
+        parsedInput = JSON.parse(tc.arguments || '{}');
+      } catch {
+        logger.warn('Failed to parse tool arguments', { tool: tc.name, args: tc.arguments });
+        parsedInput = {};
+      }
+
+      res.write(`data: ${JSON.stringify({
+        type: 'tool_use',
+        tool: tc.name,
+        input: parsedInput,
+        tool_use_id: tc.id,
+        execute_locally: true,
+      })}\n\n`);
+    }
+
+    // Store conversation - include both text content AND tool_use blocks
+    // This is critical for proper tool_use/tool_result matching
+    if (fullContent || toolCalls.length > 0) {
+      // Use a more flexible type to avoid SDK type strictness issues
+      const assistantContent: Array<{ type: string; text?: string; id?: string; name?: string; input?: unknown }> = [];
+
+      // Add text content if present
+      if (fullContent) {
+        assistantContent.push({ type: 'text', text: fullContent });
+      }
+
+      // Add tool_use blocks if present - these are required for matching tool_results
+      for (const tc of toolCalls) {
+        let parsedInput = {};
+        try {
+          parsedInput = JSON.parse(tc.arguments || '{}');
+        } catch {
+          parsedInput = {};
+        }
+        assistantContent.push({
+          type: 'tool_use',
+          id: tc.id,
+          name: tc.name,
+          input: parsedInput,
+        });
+      }
+
+      messages.push({ role: 'assistant', content: assistantContent as Anthropic.ContentBlock[] });
+    }
+    conversationHistory.set(sessionId, messages);
+
+    // Calculate cost
+    const pricing = getModelPricing(model);
+    const costUsd = (totalTokensInput / 1_000_000) * pricing.input +
+                    (totalTokensOutput / 1_000_000) * pricing.output;
+
+    // Send usage info
+    res.write(`data: ${JSON.stringify({
+      type: 'usage',
+      tokensInput: totalTokensInput,
+      tokensOutput: totalTokensOutput,
+      costUsd,
+      hasReasoning: reasoningContent.length > 0,
+    })}\n\n`);
+
+    // Send completion message with full summary
+    res.write(`data: ${JSON.stringify({
+      type: 'turn_complete',
+      sessionId,
+      model,
+      stopReason: toolCalls.length > 0 ? 'tool_use' : 'end_turn',
+      needsToolExecution: toolCalls.length > 0,
+      pendingTools: toolCalls.map(t => ({ id: t.id, name: t.name })),
+      tokensInput: totalTokensInput,
+      tokensOutput: totalTokensOutput,
+      costUsd,
+      contentLength: fullContent.length,
+      reasoningLength: reasoningContent.length,
+    })}\n\n`);
+
+    // Send final done signal
+    res.write(`data: ${JSON.stringify({
+      type: 'done',
+      sessionId,
+    })}\n\n`);
+
+    logger.info('Streaming completed successfully', {
+      sessionId,
+      model,
+      contentLength: fullContent.length,
+      reasoningLength: reasoningContent.length,
+      toolCalls: toolCalls.length,
+      chunkCount,
+      tokensInput: totalTokensInput,
+      tokensOutput: totalTokensOutput,
+    });
+
+  } catch (error) {
+    logger.error('Streaming error', {
+      error: (error as Error).message,
+      stack: (error as Error).stack,
+    });
+
+    if (!aborted) {
+      res.write(`data: ${JSON.stringify({
+        type: 'error',
+        content: (error as Error).message,
+      })}\n\n`);
+    }
+  } finally {
+    res.end();
+  }
+};
+
+/**
+ * Submit tool results from client and continue the conversation
+ */
+export const submitToolResults = async (
+  sessionId: string,
+  toolResults: Array<{ tool_use_id: string; output: string; is_error: boolean }>,
+  workspacePath: string,
+  res: Response,
+  options: SdkOptions = {}
+): Promise<void> => {
+  // Set SSE headers
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
+
+  let aborted = false;
+
+  res.on('close', () => {
+    aborted = true;
+    logger.info('Client disconnected from tool results stream');
+  });
+
+  try {
+    // Get conversation history
+    let messages = conversationHistory.get(sessionId);
+    if (!messages) {
+      res.write(`data: ${JSON.stringify({
+        type: 'error',
+        content: 'Session not found',
+      })}\n\n`);
+      res.end();
+      return;
+    }
+
+    // Make a copy and validate to prevent tool_use_id mismatch errors
+    messages = validateConversationHistory([...messages]);
+
+    const model = options.model || openRouterConfig.defaultModel;
+    const maxTokens = options.maxTokens || 8192;
+
+    logger.info('Processing tool results from client', {
+      sessionId,
+      toolCount: toolResults.length,
+    });
+
+    // Validate that tool_use_ids have matching tool_use blocks in the last assistant message
+    const lastAssistantMsg = [...messages].reverse().find(m => m.role === 'assistant');
+    const validToolUseIds = new Set<string>();
+
+    if (lastAssistantMsg && Array.isArray(lastAssistantMsg.content)) {
+      for (const block of lastAssistantMsg.content) {
+        if (typeof block === 'object' && 'type' in block && block.type === 'tool_use') {
+          validToolUseIds.add((block as Anthropic.ToolUseBlock).id);
+        }
+      }
+    }
+
+    // Filter tool results to only include those with valid matching tool_use
+    const validToolResults = toolResults.filter(r => {
+      if (validToolUseIds.has(r.tool_use_id)) {
+        return true;
+      }
+      logger.warn('Skipping tool result with no matching tool_use', {
+        tool_use_id: r.tool_use_id,
+      });
+      return false;
+    });
+
+    if (validToolResults.length === 0) {
+      logger.warn('No valid tool results to process', { sessionId });
+      res.write(`data: ${JSON.stringify({
+        type: 'error',
+        content: 'No valid tool results found - tool_use_ids do not match any pending tool uses',
+      })}\n\n`);
+      res.end();
+      return;
+    }
+
+    // Add tool results to messages
+    const toolResultBlocks: Anthropic.ToolResultBlockParam[] = validToolResults.map(r => ({
+      type: 'tool_result',
+      tool_use_id: r.tool_use_id,
+      content: r.output,
+      is_error: r.is_error,
+    }));
+
+    messages.push({ role: 'user', content: toolResultBlocks });
+
+    // Build system prompt
+    const systemPrompt = options.systemPrompt || options.appendSystemPrompt ||
+      `You are Claude, an AI coding assistant. You have access to tools to read, write, and edit files, and run bash commands.
+Current working directory: ${workspacePath}
+
+When the user asks you to create, modify, or interact with files, use the available tools.`;
+
+    // Build request options with reasoning support
+    const requestOptions: Anthropic.MessageCreateParamsNonStreaming = {
+      model,
+      max_tokens: maxTokens,
+      system: systemPrompt,
+      messages,
+      tools: toolDefinitions as Anthropic.Tool[],
+    };
+
+    // Enable reasoning for DeepSeek models
+    if (supportsReasoning(model)) {
+      (requestOptions as unknown as Record<string, unknown>)['reasoning'] = {
+        effort: 'high',
+        exclude: false,
+      };
+    }
+
+    // Get response
+    const response = await client.messages.create(requestOptions);
+
+    // Process response
+    const toolUseBlocks: Anthropic.ToolUseBlock[] = [];
+    let reasoningContent = '';
+
+    // Check for reasoning field on the response (OpenRouter format)
+    const rawResponse = response as unknown as Record<string, unknown>;
+    if (rawResponse.reasoning) {
+      reasoningContent = rawResponse.reasoning as string;
+      logger.info('Found reasoning in tool response', { length: reasoningContent.length });
+
+      res.write(`data: ${JSON.stringify({
+        type: 'thinking',
+        content: reasoningContent,
+      })}\n\n`);
+    }
+
+    for (const block of response.content) {
+      if (aborted) break;
+
+      if (block.type === 'thinking') {
+        // DeepSeek reasoning/thinking block (Anthropic format)
+        const thinkingBlock = block as unknown as { type: 'thinking'; thinking: string };
+        reasoningContent += thinkingBlock.thinking;
+
+        res.write(`data: ${JSON.stringify({
+          type: 'thinking',
+          content: thinkingBlock.thinking,
+        })}\n\n`);
+      } else if ((block as unknown as Record<string, unknown>).reasoning) {
+        const blockReasoning = (block as unknown as Record<string, unknown>).reasoning as string;
+        reasoningContent += blockReasoning;
+
+        res.write(`data: ${JSON.stringify({
+          type: 'thinking',
+          content: blockReasoning,
+        })}\n\n`);
+      } else if (block.type === 'text' && block.text) {
+        res.write(`data: ${JSON.stringify({
+          type: 'text',
+          content: block.text,
+        })}\n\n`);
+      } else if (block.type === 'tool_use') {
+        toolUseBlocks.push(block);
+
+        res.write(`data: ${JSON.stringify({
+          type: 'tool_use',
+          tool: block.name,
+          input: block.input,
+          tool_use_id: block.id,
+          execute_locally: true,
+        })}\n\n`);
+      }
+    }
+
+    // Update conversation history
+    messages.push({ role: 'assistant', content: response.content });
+    conversationHistory.set(sessionId, messages);
+
+    // Calculate cost
+    const pricing = getModelPricing(model);
+    const costUsd = (response.usage.input_tokens / 1_000_000) * pricing.input +
+                    (response.usage.output_tokens / 1_000_000) * pricing.output;
+
+    const needsToolExecution = response.stop_reason === 'tool_use' && toolUseBlocks.length > 0;
+
+    res.write(`data: ${JSON.stringify({
+      type: 'usage',
+      tokensInput: response.usage.input_tokens,
+      tokensOutput: response.usage.output_tokens,
+      costUsd,
+      reasoningContent: reasoningContent || undefined,
+    })}\n\n`);
+
+    res.write(`data: ${JSON.stringify({
+      type: 'turn_complete',
+      sessionId,
+      model,
+      stopReason: response.stop_reason,
+      needsToolExecution,
+      pendingTools: toolUseBlocks.map(t => ({ id: t.id, name: t.name })),
+      tokensInput: response.usage.input_tokens,
+      tokensOutput: response.usage.output_tokens,
+      costUsd,
+      reasoningContent: reasoningContent || undefined,
+    })}\n\n`);
+
+    logger.info('Tool results processed', {
+      sessionId,
+      stopReason: response.stop_reason,
+      newToolsRequested: toolUseBlocks.length,
+    });
+
+  } catch (error) {
+    logger.error('Tool results processing error', { error: (error as Error).message });
+
+    if (!aborted) {
+      res.write(`data: ${JSON.stringify({
+        type: 'error',
+        content: (error as Error).message,
+      })}\n\n`);
+    }
+  } finally {
+    res.end();
+  }
+};
+
 export default {
   runSdkStreaming,
   runSdkSync,
   resumeSession,
   clearSession,
   getSessionHistory,
+  runChatStreaming,
+  submitToolResults,
 };

@@ -6,8 +6,13 @@ import Conf from 'conf';
 import fetch, { Response as FetchResponse } from 'node-fetch';
 import ora from 'ora';
 import inquirer from 'inquirer';
+import * as path from 'path';
+import * as fs from 'fs';
+import { executeToolLocally, getToolDescription } from './tools';
+import { TaskProgressDisplay } from './task-progress';
 
 const config = new Conf({ projectName: 'openanalyst' });
+const sessionsStore = new Conf({ projectName: 'openanalyst-sessions' });
 const program = new Command();
 
 // Type definitions
@@ -540,6 +545,175 @@ program
     }
   });
 
+// Session message interface
+interface SessionMessage {
+  role: 'user' | 'assistant';
+  content: string;
+  timestamp: string;
+  tokensUsed?: number;
+  reasoningContent?: string;  // Store DeepSeek thinking/reasoning
+}
+
+// Session storage interface
+interface StoredSession {
+  id: string;
+  title: string;
+  projectId: string;
+  workingDir: string;
+  messageCount: number;
+  createdAt: string;
+  lastMessageAt: string;
+  messages: SessionMessage[];           // Store actual messages
+  firstMessagePreview: string;          // Truncated first user message for display
+}
+
+// Helper to truncate strings
+const truncate = (str: string, len: number): string => {
+  if (!str) return '';
+  return str.length > len ? str.slice(0, len) + '...' : str;
+};
+
+// Generate title from first user message
+const generateSessionTitle = (messages: SessionMessage[]): string => {
+  const firstUserMsg = messages.find(m => m.role === 'user');
+  if (!firstUserMsg) return 'New Session';
+  return truncate(firstUserMsg.content, 50);
+};
+
+// Generate a unique session ID
+const generateSessionId = (): string => {
+  return `session-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
+};
+
+// Helper function to continue conversation after local tool execution
+async function continueWithToolResults(
+  sessionId: string,
+  toolResults: Array<{ tool_use_id: string; output: string; is_error: boolean }>,
+  projectId: string,
+  model: string,
+  workingDir: string,
+  sessionStats: { tokensInput: number; tokensOutput: number; costUsd: number; messages: number }
+): Promise<void> {
+  const apiUrl = config.get('apiUrl') as string;
+  const token = config.get('token') as string;
+
+  if (!apiUrl || !token) return;
+
+  try {
+    const response = await fetch(`${apiUrl}/api/agent/sdk/chat/tools`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        sessionId,
+        toolResults,
+        projectId,
+        model,
+      }),
+    });
+
+    if (!response.ok) return;
+
+    const body = response.body;
+    if (!body) return;
+
+    let buffer = '';
+    let pendingTools: Array<{ id: string; name: string; input: Record<string, unknown> }> = [];
+    let isThinkingContinue = false;
+
+    // Process the stream
+    await new Promise<void>((resolve, reject) => {
+      body.on('data', async (chunk: Buffer) => {
+        buffer += chunk.toString();
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
+
+        for (const line of lines) {
+          if (line.startsWith('data: ')) {
+            try {
+              const msg = JSON.parse(line.slice(6)) as {
+                type: string;
+                content?: string;
+                tool?: string;
+                tool_use_id?: string;
+                input?: Record<string, unknown>;
+                execute_locally?: boolean;
+                tokensInput?: number;
+                tokensOutput?: number;
+                costUsd?: number;
+                needsToolExecution?: boolean;
+              };
+
+              if (msg.type === 'thinking' && msg.content) {
+                // DeepSeek reasoning/thinking block
+                if (!isThinkingContinue) {
+                  isThinkingContinue = true;
+                  console.log(chalk.gray('\n  💭 Thinking...\n'));
+                }
+                process.stdout.write(chalk.dim.gray(msg.content));
+              } else if (msg.type === 'text' && msg.content) {
+                // End thinking section if we were thinking
+                if (isThinkingContinue) {
+                  isThinkingContinue = false;
+                  console.log(chalk.gray('\n\n  ─────────────────────────────\n'));
+                }
+                process.stdout.write(msg.content);
+              } else if (msg.type === 'tool_use' && msg.execute_locally) {
+                pendingTools.push({
+                  id: msg.tool_use_id || '',
+                  name: msg.tool || '',
+                  input: msg.input || {},
+                });
+                console.log(chalk.yellow(`\n[Tool: ${msg.tool}]`));
+              } else if (msg.type === 'usage' && msg.tokensInput) {
+                sessionStats.tokensInput += msg.tokensInput || 0;
+                sessionStats.tokensOutput += msg.tokensOutput || 0;
+                sessionStats.costUsd += msg.costUsd || 0;
+              } else if (msg.type === 'error') {
+                console.error(chalk.red(`\nError: ${msg.content}`));
+              }
+            } catch {
+              // Ignore parse errors
+            }
+          }
+        }
+      });
+
+      body.on('end', () => resolve());
+      body.on('error', (err: Error) => reject(err));
+    });
+
+    // If there are more tools to execute, continue recursively
+    if (pendingTools.length > 0) {
+      const newToolResults: Array<{ tool_use_id: string; output: string; is_error: boolean }> = [];
+
+      for (const tool of pendingTools) {
+        console.log(chalk.gray(`  Executing ${tool.name}...`));
+        const result = await executeToolLocally(tool.name, tool.input, workingDir);
+
+        if (result.success) {
+          console.log(chalk.green(`  ✓ ${getToolDescription(tool.name, tool.input)}`));
+        } else {
+          console.log(chalk.red(`  ✗ ${result.error}`));
+        }
+
+        newToolResults.push({
+          tool_use_id: tool.id,
+          output: result.success ? result.output : `Error: ${result.error}`,
+          is_error: !result.success,
+        });
+      }
+
+      // Continue with new tool results
+      await continueWithToolResults(sessionId, newToolResults, projectId, model, workingDir, sessionStats);
+    }
+  } catch (error) {
+    console.error(chalk.red(`Error continuing conversation: ${(error as Error).message}`));
+  }
+}
+
 // Interactive mode
 program
   .command('interactive')
@@ -547,10 +721,12 @@ program
   .description('Start interactive mode')
   .option('-p, --project <id>', 'Project ID')
   .option('-m, --model <model>', 'Model to use')
+  .option('-d, --dir <path>', 'Working directory')
   .action(async (options) => {
     let currentProject = options.project || config.get('project') || 'default';
     let currentModel = options.model || '';
-    let useSdk = true; // Default to SDK mode (works from localhost without local Claude)
+    let useLocalTools = true; // Use local tool execution by default
+    let useSdk = true; // Always use SDK mode (API calls)
     let currentTools: string[] = [];
     let disallowedTools: string[] = [];
     let permissionMode: string = 'default';
@@ -559,16 +735,72 @@ program
     let mcpServers: Record<string, { command: string; args?: string[] }> = {};
     let hooks: { preMessage?: string; postMessage?: string; onError?: string } = {};
 
+    // Current session info
+    let currentSessionId = generateSessionId();
+    let serverSessionId: string | null = null; // Track server-side session for conversation continuation
+    let workingDir = options.dir || process.cwd();
+    let conversationHistory: SessionMessage[] = [];
+
+    // Task progress display (WebSocket client)
+    const taskProgressDisplay = new TaskProgressDisplay();
+    let taskProgressConnected = false;
+
+    // Try to connect to WebSocket for task progress (non-blocking)
+    const apiUrl = config.get('apiUrl') as string;
+    if (apiUrl) {
+      taskProgressDisplay.connect(apiUrl).then(() => {
+        taskProgressConnected = true;
+      }).catch(() => {
+        // Silently fail - WebSocket is optional
+        taskProgressConnected = false;
+      });
+    }
+
     // Available tools in Claude Code
-    const ALL_TOOLS = ['Read', 'Write', 'Edit', 'Bash', 'Glob', 'Grep', 'WebSearch', 'WebFetch', 'Task', 'TodoWrite', 'NotebookEdit'];
+    const ALL_TOOLS = ['Read', 'Write', 'Edit', 'Bash', 'Glob', 'Grep', 'ListDir'];
 
     console.log(chalk.cyan.bold('\n╭─────────────────────────────────────────╮'));
     console.log(chalk.cyan.bold('│') + '       OpenAnalyst Interactive Mode      ' + chalk.cyan.bold('│'));
     console.log(chalk.cyan.bold('╰─────────────────────────────────────────╯\n'));
+
+    // Ask user to confirm working directory
+    console.log(`  ${chalk.bold('Working Directory:')} ${chalk.cyan(workingDir)}`);
+
+    const { confirmDir } = await inquirer.prompt([{
+      type: 'confirm',
+      name: 'confirmDir',
+      message: 'Create/modify files in this directory?',
+      default: true,
+    }]);
+
+    if (!confirmDir) {
+      const { newDir } = await inquirer.prompt([{
+        type: 'input',
+        name: 'newDir',
+        message: 'Enter directory path:',
+        default: workingDir,
+        validate: (input: string) => {
+          const resolved = path.resolve(input);
+          if (!fs.existsSync(resolved)) {
+            return `Directory does not exist: ${resolved}`;
+          }
+          if (!fs.statSync(resolved).isDirectory()) {
+            return `Path is not a directory: ${resolved}`;
+          }
+          return true;
+        },
+      }]);
+      workingDir = path.resolve(newDir);
+      console.log(chalk.green(`  Working directory set to: ${workingDir}`));
+    }
+
+    console.log('');
     console.log(chalk.gray('Type /help for commands, or enter prompts to run Claude.\n'));
+    console.log(`  ${chalk.bold('Session:')} ${chalk.gray(currentSessionId.slice(0, 16) + '...')}`);
     console.log(`  ${chalk.bold('Project:')} ${chalk.cyan(currentProject)}`);
-    console.log(`  ${chalk.bold('Mode:')} ${useSdk ? chalk.green('SDK') : chalk.yellow('CLI')}`);
+    console.log(`  ${chalk.bold('Mode:')} ${useLocalTools ? chalk.green('Local Execution') : chalk.yellow('Server Execution')}`);
     console.log(`  ${chalk.bold('Model:')} ${currentModel || chalk.gray('default')}`);
+    console.log(`  ${chalk.bold('Directory:')} ${chalk.cyan(workingDir)}`);
     console.log('');
 
     let lastWasContinue = false;
@@ -588,7 +820,11 @@ program
         console.log(chalk.cyan('╰─────────────────────────────────────────╯\n'));
 
         console.log(chalk.bold.yellow(' Session Control:'));
+        console.log(`  ${chalk.cyan('/new')}                  Start a new chat session`);
+        console.log(`  ${chalk.cyan('/sessions')}             List previous sessions`);
+        console.log(`  ${chalk.cyan('/resume <id>')}          Resume a previous session`);
         console.log(`  ${chalk.cyan('/continue, /c')}         Continue previous conversation`);
+        console.log(`  ${chalk.cyan('/cwd [path]')}           Show or change working directory`);
         console.log(`  ${chalk.cyan('/clear')}                Clear screen and reset display`);
         console.log(`  ${chalk.cyan('/compact')}              Summarize conversation to save context`);
         console.log(`  ${chalk.cyan('/exit, /quit, /q')}      Exit interactive mode`);
@@ -630,6 +866,10 @@ program
       }
 
       if (input === '/exit' || input === '/quit' || input === '/q') {
+        // Disconnect WebSocket before exiting
+        if (taskProgressConnected) {
+          taskProgressDisplay.disconnect();
+        }
         console.log(chalk.gray('Goodbye!'));
         break;
       }
@@ -664,8 +904,10 @@ program
         console.log('');
 
         console.log(chalk.bold('  Session:'));
+        console.log(`    Session ID:    ${chalk.gray(currentSessionId.slice(0, 20) + '...')}`);
         console.log(`    Project:       ${chalk.cyan(currentProject)}`);
-        console.log(`    Mode:          ${useSdk ? chalk.green('SDK (OpenRouter)') : chalk.yellow('CLI (local)')}`);
+        console.log(`    Working Dir:   ${chalk.cyan(workingDir)}`);
+        console.log(`    Mode:          ${useLocalTools ? chalk.green('Local Execution') : chalk.yellow('Server Execution')}`);
         console.log(`    Model:         ${currentModel || chalk.gray('default')}`);
         console.log(`    Permission:    ${permissionMode}`);
         console.log('');
@@ -685,6 +927,7 @@ program
         console.log(`    Agents:        ${Object.keys(customAgents).length > 0 ? Object.keys(customAgents).join(', ') : chalk.gray('none')}`);
         console.log(`    MCP Servers:   ${Object.keys(mcpServers).length > 0 ? Object.keys(mcpServers).join(', ') : chalk.gray('none')}`);
         console.log(`    Hooks:         ${(hooks.preMessage || hooks.postMessage || hooks.onError) ? chalk.green('configured') : chalk.gray('none')}`);
+        console.log(`    Task Progress: ${taskProgressConnected ? chalk.green('WebSocket connected') : chalk.gray('not connected')}`);
         console.log('');
 
         console.log(chalk.bold('  Statistics (session):'));
@@ -692,6 +935,250 @@ program
         console.log(`    Tokens used:   ${(sessionStats.tokensInput + sessionStats.tokensOutput).toLocaleString()}`);
         console.log(`    Est. cost:     ${chalk.green('$' + sessionStats.costUsd.toFixed(4))}`);
         console.log('');
+        continue;
+      }
+
+      // ==================== /new ====================
+      if (input === '/new') {
+        // Save current session if it has messages
+        if (sessionStats.messages > 0 && conversationHistory.length > 0) {
+          const sessions = (sessionsStore.get('sessions') as StoredSession[]) || [];
+          const existingIndex = sessions.findIndex(s => s.id === currentSessionId);
+
+          const sessionData: StoredSession = {
+            id: currentSessionId,
+            title: generateSessionTitle(conversationHistory),
+            projectId: currentProject,
+            workingDir,
+            messageCount: sessionStats.messages,
+            createdAt: existingIndex >= 0 ? sessions[existingIndex].createdAt : new Date().toISOString(),
+            lastMessageAt: new Date().toISOString(),
+            messages: conversationHistory,
+            firstMessagePreview: conversationHistory[0]?.content?.slice(0, 100) || 'New Session',
+          };
+
+          if (existingIndex >= 0) {
+            sessions[existingIndex] = sessionData;
+          } else {
+            sessions.push(sessionData);
+          }
+
+          // Keep only last 50 sessions
+          if (sessions.length > 50) {
+            sessions.splice(0, sessions.length - 50);
+          }
+
+          sessionsStore.set('sessions', sessions);
+        }
+
+        // Create new session
+        currentSessionId = generateSessionId();
+        serverSessionId = null; // Reset server session for new conversation
+        sessionStats = { tokensInput: 0, tokensOutput: 0, costUsd: 0, messages: 0 };
+        conversationHistory = [];
+
+        // Subscribe WebSocket to new session
+        if (taskProgressConnected) {
+          taskProgressDisplay.subscribeToSession(currentSessionId);
+        }
+
+        console.log(chalk.green(`\n  Started new session: ${currentSessionId.slice(0, 16)}...`));
+        console.log(chalk.gray(`  Working directory: ${workingDir}\n`));
+        continue;
+      }
+
+      // ==================== /sessions ====================
+      if (input === '/sessions') {
+        console.log(chalk.cyan('\n╭─────────────────────────────────────────╮'));
+        console.log(chalk.cyan('│') + chalk.bold('          Previous Sessions             ') + chalk.cyan('│'));
+        console.log(chalk.cyan('╰─────────────────────────────────────────╯\n'));
+
+        const sessions = (sessionsStore.get('sessions') as StoredSession[]) || [];
+
+        if (sessions.length === 0) {
+          console.log(chalk.gray('  No previous sessions found.\n'));
+        } else {
+          console.log(chalk.bold('  Recent Sessions:\n'));
+          const recentSessions = sessions.slice(-10).reverse();
+          for (const s of recentSessions) {
+            const date = new Date(s.lastMessageAt).toLocaleDateString();
+            const preview = s.firstMessagePreview || s.title || 'New Session';
+
+            console.log(`  ${chalk.white('•')} "${chalk.cyan(truncate(preview, 50))}"`);
+            console.log(`    ${chalk.gray(`${s.messageCount} msgs | ${date} | ${truncate(s.workingDir, 40)}`)}\n`);
+          }
+        }
+
+        console.log(chalk.gray('  Tip: Use /resume to select a session interactively\n'));
+        continue;
+      }
+
+      // ==================== /resume ====================
+      // Interactive resume (no ID provided)
+      if (input === '/resume') {
+        const sessions = (sessionsStore.get('sessions') as StoredSession[]) || [];
+
+        if (sessions.length === 0) {
+          console.log(chalk.yellow('\n  No previous sessions found.\n'));
+          continue;
+        }
+
+        // Save current session first if it has messages
+        if (sessionStats.messages > 0 && conversationHistory.length > 0) {
+          const existingIndex = sessions.findIndex(s => s.id === currentSessionId);
+          const sessionData: StoredSession = {
+            id: currentSessionId,
+            title: generateSessionTitle(conversationHistory),
+            projectId: currentProject,
+            workingDir,
+            messageCount: sessionStats.messages,
+            createdAt: existingIndex >= 0 ? sessions[existingIndex].createdAt : new Date().toISOString(),
+            lastMessageAt: new Date().toISOString(),
+            messages: conversationHistory,
+            firstMessagePreview: conversationHistory[0]?.content?.slice(0, 100) || 'New Session',
+          };
+
+          if (existingIndex >= 0) {
+            sessions[existingIndex] = sessionData;
+          } else {
+            sessions.push(sessionData);
+          }
+          sessionsStore.set('sessions', sessions);
+        }
+
+        // Build choices for inquirer - most recent first
+        const choices = sessions
+          .slice()
+          .reverse()
+          .map(s => {
+            const preview = s.firstMessagePreview || s.title || 'New Session';
+            const date = new Date(s.lastMessageAt).toLocaleDateString();
+            return {
+              name: `"${truncate(preview, 45)}" ${chalk.gray(`(${s.messageCount} msgs, ${date})`)}`,
+              value: s.id,
+              short: truncate(preview, 30),
+            };
+          });
+
+        // Add cancel option
+        choices.push({
+          name: chalk.gray('  [Cancel]'),
+          value: '__cancel__',
+          short: 'Cancel',
+        });
+
+        console.log('');
+        const { selectedSession } = await inquirer.prompt([{
+          type: 'list',
+          name: 'selectedSession',
+          message: 'Resume Session',
+          choices,
+          pageSize: 10,
+          loop: false,
+        }]);
+
+        if (selectedSession === '__cancel__') {
+          console.log(chalk.gray('  Cancelled.\n'));
+          continue;
+        }
+
+        // Resume the selected session
+        const session = sessions.find(s => s.id === selectedSession);
+        if (session) {
+          currentSessionId = session.id;
+          currentProject = session.projectId;
+          workingDir = session.workingDir;
+          conversationHistory = session.messages || [];
+          sessionStats = { tokensInput: 0, tokensOutput: 0, costUsd: 0, messages: session.messageCount };
+
+          // Subscribe WebSocket to resumed session
+          if (taskProgressConnected) {
+            taskProgressDisplay.subscribeToSession(currentSessionId);
+          }
+
+          console.log(chalk.green(`\n  Resumed: "${truncate(session.firstMessagePreview || session.title, 40)}"`));
+          console.log(`  ${chalk.bold('Messages:')} ${session.messageCount} | ${chalk.bold('Dir:')} ${chalk.cyan(truncate(workingDir, 40))}\n`);
+        }
+        continue;
+      }
+
+      // Resume by ID (for backwards compatibility)
+      if (input.startsWith('/resume ')) {
+        const targetId = input.slice(8).trim();
+        const sessions = (sessionsStore.get('sessions') as StoredSession[]) || [];
+
+        // Find session by partial ID match
+        const session = sessions.find(s => s.id.startsWith(targetId) || s.id.includes(targetId));
+
+        if (!session) {
+          console.log(chalk.yellow(`\n  Session not found: ${targetId}`));
+          console.log(chalk.gray('  Use /resume to see available sessions\n'));
+          continue;
+        }
+
+        // Save current session first
+        if (sessionStats.messages > 0 && conversationHistory.length > 0 && currentSessionId !== session.id) {
+          const existingIndex = sessions.findIndex(s => s.id === currentSessionId);
+          const sessionData: StoredSession = {
+            id: currentSessionId,
+            title: generateSessionTitle(conversationHistory),
+            projectId: currentProject,
+            workingDir,
+            messageCount: sessionStats.messages,
+            createdAt: existingIndex >= 0 ? sessions[existingIndex].createdAt : new Date().toISOString(),
+            lastMessageAt: new Date().toISOString(),
+            messages: conversationHistory,
+            firstMessagePreview: conversationHistory[0]?.content?.slice(0, 100) || 'New Session',
+          };
+
+          if (existingIndex >= 0) {
+            sessions[existingIndex] = sessionData;
+          } else {
+            sessions.push(sessionData);
+          }
+          sessionsStore.set('sessions', sessions);
+        }
+
+        // Resume the selected session
+        currentSessionId = session.id;
+        currentProject = session.projectId;
+        workingDir = session.workingDir;
+        conversationHistory = session.messages || [];
+        sessionStats = { tokensInput: 0, tokensOutput: 0, costUsd: 0, messages: session.messageCount };
+
+        // Subscribe WebSocket to resumed session
+        if (taskProgressConnected) {
+          taskProgressDisplay.subscribeToSession(currentSessionId);
+        }
+
+        console.log(chalk.green(`\n  Resumed: "${truncate(session.firstMessagePreview || session.title, 40)}"`));
+        console.log(`  ${chalk.bold('Messages:')} ${session.messageCount} | ${chalk.bold('Dir:')} ${chalk.cyan(truncate(workingDir, 40))}\n`);
+        continue;
+      }
+
+      // ==================== /cwd ====================
+      if (input === '/cwd') {
+        console.log(`\n  ${chalk.bold('Current Working Directory:')}`);
+        console.log(`  ${chalk.cyan(workingDir)}\n`);
+        continue;
+      }
+
+      if (input.startsWith('/cwd ')) {
+        const newDir = input.slice(5).trim();
+        const resolved = path.resolve(newDir);
+
+        if (!fs.existsSync(resolved)) {
+          console.log(chalk.red(`\n  Directory does not exist: ${resolved}\n`));
+          continue;
+        }
+
+        if (!fs.statSync(resolved).isDirectory()) {
+          console.log(chalk.red(`\n  Path is not a directory: ${resolved}\n`));
+          continue;
+        }
+
+        workingDir = resolved;
+        console.log(chalk.green(`\n  Working directory changed to: ${workingDir}\n`));
         continue;
       }
 
@@ -1195,27 +1682,35 @@ program
           message: 'Select model:',
           choices: [
             {
-              name: `${chalk.cyan('●')} anthropic/claude-sonnet-4     ${chalk.gray('- Balanced (recommended)')}`,
+              name: `${chalk.blue('●')} deepseek/deepseek-r1           ${chalk.gray('- DeepSeek R1 with reasoning (recommended!)')}`,
+              value: 'deepseek/deepseek-r1',
+            },
+            {
+              name: `${chalk.blue('●')} deepseek/deepseek-v3.2         ${chalk.gray('- DeepSeek V3.2 with reasoning')}`,
+              value: 'deepseek/deepseek-v3.2',
+            },
+            {
+              name: `${chalk.gray('●')} deepseek/deepseek-chat-v3-0324 ${chalk.gray('- DeepSeek V3 (no reasoning, faster)')}`,
+              value: 'deepseek/deepseek-chat-v3-0324',
+            },
+            {
+              name: `${chalk.cyan('●')} anthropic/claude-sonnet-4     ${chalk.gray('- Claude Sonnet (balanced)')}`,
               value: 'anthropic/claude-sonnet-4',
             },
             {
-              name: `${chalk.magenta('●')} anthropic/claude-opus-4      ${chalk.gray('- Most capable')}`,
+              name: `${chalk.magenta('●')} anthropic/claude-opus-4      ${chalk.gray('- Claude Opus (most capable)')}`,
               value: 'anthropic/claude-opus-4',
             },
             {
-              name: `${chalk.green('●')} anthropic/claude-haiku-4     ${chalk.gray('- Fastest, lowest cost')}`,
+              name: `${chalk.green('●')} anthropic/claude-haiku-4     ${chalk.gray('- Claude Haiku (fastest)')}`,
               value: 'anthropic/claude-haiku-4',
-            },
-            {
-              name: `${chalk.yellow('●')} anthropic/claude-sonnet-4.5  ${chalk.gray('- Latest Sonnet')}`,
-              value: 'anthropic/claude-sonnet-4.5',
             },
             {
               name: chalk.gray('  [Enter custom model...]'),
               value: '__custom__',
             },
           ],
-          default: currentModel || 'anthropic/claude-sonnet-4',
+          default: currentModel || 'deepseek/deepseek-r1',
           loop: false,
         }]);
 
@@ -1246,13 +1741,20 @@ program
         continue;
       }
 
-      // SDK toggle
+      // SDK toggle (kept for compatibility, but local execution is preferred)
       if (input === '/sdk') {
-        useSdk = !useSdk;
-        console.log(chalk.green(`Mode: ${useSdk ? 'SDK (API calls via OpenRouter)' : 'CLI (spawns local Claude)'}`));
-        if (!useSdk) {
-          console.log(chalk.yellow('⚠️  CLI mode requires Claude Code installed on the server'));
+        useLocalTools = !useLocalTools;
+        console.log(chalk.green(`Mode: ${useLocalTools ? 'Local Execution (files created here)' : 'Server Execution (files on server)'}`));
+        if (!useLocalTools) {
+          console.log(chalk.yellow('⚠️  Server mode creates files on the remote server, not locally'));
         }
+        continue;
+      }
+
+      // Local toggle
+      if (input === '/local') {
+        useLocalTools = !useLocalTools;
+        console.log(chalk.green(`Local execution: ${useLocalTools ? 'ON (files created in ' + workingDir + ')' : 'OFF (files on server)'}`));
         continue;
       }
 
@@ -1291,84 +1793,311 @@ program
 
       if (!input.trim()) continue;
 
-      // Determine endpoint based on mode and continue flag
-      let endpoint: string;
-      if (lastWasContinue) {
-        // Use SDK continue when in SDK mode
-        endpoint = useSdk ? '/api/agent/sdk/continue' : '/api/agent/continue';
-      } else if (useSdk) {
-        endpoint = '/api/agent/sdk/run';
-      } else {
-        endpoint = '/api/agent/run';
-      }
+      // Track user message
+      conversationHistory.push({
+        role: 'user',
+        content: input,
+        timestamp: new Date().toISOString(),
+      });
 
-      // Build request body with all options
-      const requestBody: Record<string, unknown> = {
-        prompt: input,
-        projectId: currentProject,
-      };
-      if (currentModel) requestBody.model = currentModel;
-      if (currentTools.length > 0) requestBody.allowedTools = currentTools;
-      if (disallowedTools.length > 0) requestBody.disallowedTools = disallowedTools;
-      if (permissionMode !== 'default') requestBody.permissionMode = permissionMode;
-      if (Object.keys(customAgents).length > 0) requestBody.agents = customAgents;
-      if (Object.keys(mcpServers).length > 0) requestBody.mcpServers = mcpServers;
+      // Use local execution mode (chat endpoint with local tool execution)
+      if (useLocalTools) {
+        // Build request body
+        const requestBody: Record<string, unknown> = {
+          prompt: input,
+          projectId: currentProject,
+        };
+        if (currentModel) requestBody.model = currentModel;
+        if (currentTools.length > 0) requestBody.allowedTools = currentTools;
 
-      const spinner = ora({
-        text: chalk.cyan('Thinking...'),
-        spinner: 'dots',
-      }).start();
+        // Use server session ID for conversation continuation (avoids tool_use_id mismatch)
+        // The server maintains the full conversation history with tool_use blocks
+        if (serverSessionId) {
+          requestBody.resume = serverSessionId;
+        }
 
-      try {
-        const response = await apiRequest(endpoint, {
-          method: 'POST',
-          body: requestBody,
-          stream: true,
-        });
+        const spinner = ora({
+          text: chalk.cyan('Thinking...'),
+          spinner: 'dots',
+        }).start();
 
-        // Check if it's a FetchResponse (streaming) or ApiResponse (error)
-        if ('body' in response && response.body) {
-          spinner.stop();
-          process.stdout.write('\n');
-
-          await processStream(response as FetchResponse, (msg: StreamMessage) => {
-            // Handle different message types
-            handleStreamMessage(msg);
-
-            // Update session stats from usage data
-            if (msg.type === 'usage' && msg.tokensInput) {
-              sessionStats.tokensInput += msg.tokensInput || 0;
-              sessionStats.tokensOutput += msg.tokensOutput || 0;
-              sessionStats.costUsd += msg.costUsd || 0;
-            }
-            if (msg.type === 'done') {
-              sessionStats.messages++;
-            }
+        try {
+          // Use the chat endpoint that returns tool_use for local execution
+          const response = await apiRequest('/api/agent/sdk/chat', {
+            method: 'POST',
+            body: requestBody,
+            stream: true,
           });
 
-          console.log('\n');
-        } else {
-          // It's a JSON response (likely an error)
+          if ('body' in response && response.body) {
+            spinner.stop();
+            process.stdout.write('\n');
+
+            // Track pending tools, assistant response, and reasoning
+            let pendingTools: Array<{ id: string; name: string; input: Record<string, unknown> }> = [];
+            let assistantResponse = '';
+            let thinkingContent = '';
+            let isThinking = false;
+
+            // Process the stream
+            await processStream(response as FetchResponse, (msg: StreamMessage & {
+              session_id?: string;
+              tool_use_id?: string;
+              input?: Record<string, unknown>;
+              execute_locally?: boolean;
+              needsToolExecution?: boolean;
+              pendingTools?: Array<{ id: string; name: string }>;
+              tool?: string;
+              reasoningContent?: string;
+            }) => {
+              if (msg.type === 'system' && msg.session_id) {
+                serverSessionId = msg.session_id; // Update outer variable for future requests
+              } else if (msg.type === 'thinking' && msg.content) {
+                // DeepSeek reasoning/thinking block
+                if (!isThinking) {
+                  isThinking = true;
+                  console.log(chalk.gray('\n  💭 Thinking...\n'));
+                }
+                thinkingContent += msg.content;
+                // Display thinking in dimmed gray
+                process.stdout.write(chalk.dim.gray(msg.content));
+              } else if (msg.type === 'text' && msg.content) {
+                // End thinking section if we were thinking
+                if (isThinking) {
+                  isThinking = false;
+                  console.log(chalk.gray('\n\n  ─────────────────────────────\n'));
+                }
+                process.stdout.write(msg.content);
+                assistantResponse += msg.content;
+              } else if (msg.type === 'tool_use' && msg.execute_locally) {
+                // Queue tool for local execution
+                pendingTools.push({
+                  id: msg.tool_use_id || '',
+                  name: msg.tool || '',
+                  input: msg.input || {},
+                });
+                console.log(chalk.yellow(`\n[Tool: ${msg.tool}]`));
+              } else if (msg.type === 'usage' && msg.tokensInput) {
+                sessionStats.tokensInput += msg.tokensInput || 0;
+                sessionStats.tokensOutput += msg.tokensOutput || 0;
+                sessionStats.costUsd += msg.costUsd || 0;
+              } else if (msg.type === 'turn_complete') {
+                // Check if we need to execute tools
+                if (msg.needsToolExecution && pendingTools.length > 0) {
+                  // Will execute tools after stream ends
+                }
+              } else if (msg.type === 'error') {
+                console.error(chalk.red(`\nError: ${msg.content}`));
+              }
+            });
+
+            // Execute pending tools locally
+            if (pendingTools.length > 0) {
+              const toolResults: Array<{ tool_use_id: string; output: string; is_error: boolean }> = [];
+
+              for (const tool of pendingTools) {
+                console.log(chalk.gray(`  Executing ${tool.name}...`));
+                const result = await executeToolLocally(tool.name, tool.input, workingDir);
+
+                if (result.success) {
+                  console.log(chalk.green(`  ✓ ${getToolDescription(tool.name, tool.input)}`));
+                } else {
+                  console.log(chalk.red(`  ✗ ${result.error}`));
+                }
+
+                toolResults.push({
+                  tool_use_id: tool.id,
+                  output: result.success ? result.output : `Error: ${result.error}`,
+                  is_error: !result.success,
+                });
+              }
+
+              // Submit tool results back to server and continue
+              if (serverSessionId && toolResults.length > 0) {
+                await continueWithToolResults(serverSessionId, toolResults, currentProject, currentModel, workingDir, sessionStats);
+              }
+            }
+
+            // Track assistant response with reasoning
+            if (assistantResponse) {
+              conversationHistory.push({
+                role: 'assistant',
+                content: assistantResponse,
+                timestamp: new Date().toISOString(),
+                tokensUsed: sessionStats.tokensOutput,
+                reasoningContent: thinkingContent || undefined,
+              });
+            }
+
+            // Auto-save session after each exchange
+            const sessions = (sessionsStore.get('sessions') as StoredSession[]) || [];
+            const existingIndex = sessions.findIndex(s => s.id === currentSessionId);
+            const sessionData: StoredSession = {
+              id: currentSessionId,
+              title: generateSessionTitle(conversationHistory),
+              projectId: currentProject,
+              workingDir,
+              messageCount: sessionStats.messages + 1,
+              createdAt: existingIndex >= 0 ? sessions[existingIndex].createdAt : new Date().toISOString(),
+              lastMessageAt: new Date().toISOString(),
+              messages: conversationHistory,
+              firstMessagePreview: conversationHistory[0]?.content?.slice(0, 100) || 'New Session',
+            };
+
+            if (existingIndex >= 0) {
+              sessions[existingIndex] = sessionData;
+            } else {
+              sessions.push(sessionData);
+            }
+
+            // Keep only last 50 sessions
+            if (sessions.length > 50) {
+              sessions.splice(0, sessions.length - 50);
+            }
+
+            sessionsStore.set('sessions', sessions);
+
+            sessionStats.messages++;
+            console.log('\n');
+          } else {
+            spinner.stop();
+            const jsonResponse = response as ApiResponse;
+            if (!jsonResponse.success) {
+              console.error(chalk.red(`\nError: ${jsonResponse.error?.message || 'Unknown error'}\n`));
+              // Remove the user message we added since the request failed
+              conversationHistory.pop();
+            }
+          }
+        } catch (error) {
           spinner.stop();
-          const jsonResponse = response as ApiResponse;
-          if (!jsonResponse.success) {
-            console.error(chalk.red(`\nError: ${jsonResponse.error?.message || 'Unknown error'}\n`));
-          } else if (jsonResponse.data) {
-            console.log(chalk.cyan('\nResponse:'));
-            console.log(JSON.stringify(jsonResponse.data, null, 2));
-            console.log('');
+          console.error(chalk.red(`\nError: ${(error as Error).message}\n`));
+          // Remove the user message we added since the request failed
+          conversationHistory.pop();
+
+          if ((error as Error).message.includes('ECONNREFUSED')) {
+            console.log(chalk.yellow('  Tip: Check if the API server is running'));
           }
         }
-      } catch (error) {
-        spinner.stop();
-        console.error(chalk.red(`\nError: ${(error as Error).message}\n`));
+      } else {
+        // Server execution mode (original behavior)
+        let endpoint: string;
+        if (lastWasContinue) {
+          endpoint = useSdk ? '/api/agent/sdk/continue' : '/api/agent/continue';
+        } else if (useSdk) {
+          endpoint = '/api/agent/sdk/run';
+        } else {
+          endpoint = '/api/agent/run';
+        }
 
-        // Provide helpful suggestions
-        if ((error as Error).message.includes('ECONNREFUSED')) {
-          console.log(chalk.yellow('  Tip: Check if the API server is running'));
-          console.log(chalk.gray(`  API URL: ${config.get('apiUrl')}`));
-        } else if ((error as Error).message.includes('401') || (error as Error).message.includes('Unauthorized')) {
-          console.log(chalk.yellow('  Tip: Try re-authenticating with: openanalyst auth login'));
+        const requestBody: Record<string, unknown> = {
+          prompt: input,
+          projectId: currentProject,
+        };
+        if (currentModel) requestBody.model = currentModel;
+        if (currentTools.length > 0) requestBody.allowedTools = currentTools;
+        if (disallowedTools.length > 0) requestBody.disallowedTools = disallowedTools;
+        if (permissionMode !== 'default') requestBody.permissionMode = permissionMode;
+        if (Object.keys(customAgents).length > 0) requestBody.agents = customAgents;
+        if (Object.keys(mcpServers).length > 0) requestBody.mcpServers = mcpServers;
+
+        const spinner = ora({
+          text: chalk.cyan('Thinking...'),
+          spinner: 'dots',
+        }).start();
+
+        try {
+          const response = await apiRequest(endpoint, {
+            method: 'POST',
+            body: requestBody,
+            stream: true,
+          });
+
+          if ('body' in response && response.body) {
+            spinner.stop();
+            process.stdout.write('\n');
+
+            let assistantResponse = '';
+
+            await processStream(response as FetchResponse, (msg: StreamMessage) => {
+              handleStreamMessage(msg);
+
+              // Track text content for conversation history
+              if (msg.type === 'text' && msg.content) {
+                assistantResponse += msg.content;
+              }
+
+              if (msg.type === 'usage' && msg.tokensInput) {
+                sessionStats.tokensInput += msg.tokensInput || 0;
+                sessionStats.tokensOutput += msg.tokensOutput || 0;
+                sessionStats.costUsd += msg.costUsd || 0;
+              }
+              if (msg.type === 'done') {
+                sessionStats.messages++;
+              }
+            });
+
+            // Track assistant response
+            if (assistantResponse) {
+              conversationHistory.push({
+                role: 'assistant',
+                content: assistantResponse,
+                timestamp: new Date().toISOString(),
+                tokensUsed: sessionStats.tokensOutput,
+              });
+            }
+
+            // Auto-save session
+            const sessions = (sessionsStore.get('sessions') as StoredSession[]) || [];
+            const existingIndex = sessions.findIndex(s => s.id === currentSessionId);
+            const sessionData: StoredSession = {
+              id: currentSessionId,
+              title: generateSessionTitle(conversationHistory),
+              projectId: currentProject,
+              workingDir,
+              messageCount: sessionStats.messages,
+              createdAt: existingIndex >= 0 ? sessions[existingIndex].createdAt : new Date().toISOString(),
+              lastMessageAt: new Date().toISOString(),
+              messages: conversationHistory,
+              firstMessagePreview: conversationHistory[0]?.content?.slice(0, 100) || 'New Session',
+            };
+
+            if (existingIndex >= 0) {
+              sessions[existingIndex] = sessionData;
+            } else {
+              sessions.push(sessionData);
+            }
+
+            if (sessions.length > 50) {
+              sessions.splice(0, sessions.length - 50);
+            }
+
+            sessionsStore.set('sessions', sessions);
+
+            console.log('\n');
+          } else {
+            spinner.stop();
+            const jsonResponse = response as ApiResponse;
+            if (!jsonResponse.success) {
+              console.error(chalk.red(`\nError: ${jsonResponse.error?.message || 'Unknown error'}\n`));
+              conversationHistory.pop(); // Remove failed user message
+            } else if (jsonResponse.data) {
+              console.log(chalk.cyan('\nResponse:'));
+              console.log(JSON.stringify(jsonResponse.data, null, 2));
+              console.log('');
+            }
+          }
+        } catch (error) {
+          spinner.stop();
+          console.error(chalk.red(`\nError: ${(error as Error).message}\n`));
+          conversationHistory.pop(); // Remove failed user message
+
+          // Provide helpful suggestions
+          if ((error as Error).message.includes('ECONNREFUSED')) {
+            console.log(chalk.yellow('  Tip: Check if the API server is running'));
+            console.log(chalk.gray(`  API URL: ${config.get('apiUrl')}`));
+          } else if ((error as Error).message.includes('401') || (error as Error).message.includes('Unauthorized')) {
+            console.log(chalk.yellow('  Tip: Try re-authenticating with: openanalyst auth login'));
+          }
         }
       }
 
