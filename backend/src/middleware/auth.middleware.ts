@@ -4,7 +4,15 @@ import { config } from 'dotenv';
 
 config();
 
-const JWT_SECRET = process.env.JWT_SECRET || 'default-secret-change-me';
+// SECURITY: Enforce JWT_SECRET is set properly
+const JWT_SECRET = process.env.JWT_SECRET;
+if (!JWT_SECRET || JWT_SECRET === 'default-secret-change-me') {
+  console.error('FATAL: JWT_SECRET must be set to a secure value');
+  if (process.env.NODE_ENV === 'production') {
+    throw new Error('FATAL: JWT_SECRET must be set in production');
+  }
+}
+const SAFE_JWT_SECRET = JWT_SECRET || 'dev-secret-not-for-production';
 
 // Authenticated user interface
 export interface AuthUser {
@@ -39,7 +47,7 @@ export const authMiddleware = (
   const token = authHeader.replace('Bearer ', '');
 
   try {
-    const decoded = jwt.verify(token, JWT_SECRET) as AuthUser;
+    const decoded = jwt.verify(token, SAFE_JWT_SECRET) as AuthUser;
     req.user = {
       userId: decoded.userId,
       email: decoded.email,
@@ -72,7 +80,7 @@ export const optionalAuthMiddleware = (
   const token = authHeader.replace('Bearer ', '');
 
   try {
-    const decoded = jwt.verify(token, JWT_SECRET) as AuthUser;
+    const decoded = jwt.verify(token, SAFE_JWT_SECRET) as AuthUser;
     req.user = {
       userId: decoded.userId,
       email: decoded.email,

@@ -1062,6 +1062,119 @@ export const getConversationDetails = async (req: AuthRequest, res: Response): P
   }
 };
 
+/**
+ * Chat mode - returns tool_use for client-side execution
+ * POST /api/agent/sdk/chat
+ */
+export const runAgentChat = async (req: AuthRequest, res: Response): Promise<void> => {
+  const userId = req.user!.userId;
+  const { prompt, projectId = 'default', model, systemPrompt, conversationId, messages } = req.body as AgentRequestBody & {
+    messages?: Array<{ role: 'user' | 'assistant'; content: string }>;
+  };
+
+  // Validate request
+  const { error } = validate(agentQuerySchema, req.body);
+  if (error) {
+    res.status(400).json({
+      success: false,
+      error: { code: 'VALIDATION_ERROR', message: error },
+    });
+    return;
+  }
+
+  try {
+    // Ensure workspace exists
+    const workspace = await ensureWorkspace(userId, projectId);
+
+    // Find or create conversation
+    let conversation;
+    let resumeSessionId: string | undefined;
+
+    if (conversationId) {
+      conversation = await conversationRepo.findById(conversationId);
+      if (conversation?.sessionId) {
+        resumeSessionId = conversation.sessionId;
+      }
+    }
+
+    if (!conversation) {
+      conversation = await conversationRepo.findOrCreateByProject(userId, projectId, model);
+    }
+
+    // Log the query
+    logAgentQuery(conversation.conversationId, prompt, userId);
+
+    // Store user message
+    await messageRepo.createUserMessage(conversation.conversationId, prompt);
+
+    // Run chat mode (client executes tools)
+    await sdkService.runChatStreaming(prompt, workspace, res, {
+      model,
+      systemPrompt,
+      resume: resumeSessionId,
+      previousMessages: messages, // Pass client-side conversation history
+    });
+  } catch (error) {
+    logger.error('Agent chat error', { userId, projectId, error: (error as Error).message });
+
+    res.status(500).json({
+      success: false,
+      error: {
+        code: 'AGENT_ERROR',
+        message: (error as Error).message,
+      },
+    });
+  }
+};
+
+/**
+ * Submit tool results from client
+ * POST /api/agent/sdk/chat/tools
+ */
+export const submitToolResults = async (req: AuthRequest, res: Response): Promise<void> => {
+  const userId = req.user!.userId;
+  const { sessionId, toolResults, projectId = 'default', model } = req.body as {
+    sessionId: string;
+    toolResults: Array<{ tool_use_id: string; output: string; is_error: boolean }>;
+    projectId?: string;
+    model?: string;
+  };
+
+  if (!sessionId || !toolResults || !Array.isArray(toolResults)) {
+    res.status(400).json({
+      success: false,
+      error: { code: 'VALIDATION_ERROR', message: 'sessionId and toolResults are required' },
+    });
+    return;
+  }
+
+  try {
+    // Ensure workspace exists
+    const workspace = await ensureWorkspace(userId, projectId);
+
+    logger.info('Submitting tool results from client', {
+      userId,
+      sessionId,
+      toolCount: toolResults.length,
+    });
+
+    // Submit tool results and continue conversation
+    await sdkService.submitToolResults(sessionId, toolResults, workspace, res, {
+      model,
+    });
+  } catch (error) {
+    logger.error('Submit tool results error', { userId, sessionId, error: (error as Error).message });
+
+    res.status(500).json({
+      success: false,
+      error: {
+        code: 'AGENT_ERROR',
+        message: (error as Error).message,
+      },
+    });
+  }
+};
+
 export default {
   runAgent,
   runAgentSync,
@@ -1079,4 +1192,6 @@ export default {
   getUsage,
   agentHealth,
   compactConversation,
+  runAgentChat,
+  submitToolResults,
 };

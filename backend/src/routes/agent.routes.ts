@@ -17,6 +17,8 @@ import {
   getUsage,
   agentHealth,
   compactConversation,
+  runAgentChat,
+  submitToolResults,
 } from '../controllers/agent.controller';
 
 const router = Router();
@@ -80,6 +82,20 @@ router.post('/sdk/continue', continueAgentSdk);
  * @access  Private
  */
 router.post('/sdk/continue-sync', continueAgentSdkSync);
+
+/**
+ * @route   POST /api/agent/sdk/chat
+ * @desc    Chat mode - returns tool_use for client-side local execution (SSE)
+ * @access  Private
+ */
+router.post('/sdk/chat', runAgentChat);
+
+/**
+ * @route   POST /api/agent/sdk/chat/tools
+ * @desc    Submit tool results from client and continue conversation (SSE)
+ * @access  Private
+ */
+router.post('/sdk/chat/tools', submitToolResults);
 
 /**
  * Conversation endpoints

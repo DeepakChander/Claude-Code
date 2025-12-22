@@ -5,12 +5,10 @@ config();
 
 // Agent SDK Configuration for use with OpenRouter
 export const agentSdkConfig = {
-  // Default allowed tools
+  // SECURITY: Default to safe read-only tools
+  // Dangerous tools (Bash, Write, Edit) require explicit permission
   defaultAllowedTools: [
     'Read',
-    'Write',
-    'Edit',
-    'Bash',
     'Glob',
     'Grep',
     'WebSearch',
@@ -23,15 +21,20 @@ export const agentSdkConfig = {
     write: ['Write', 'Edit'],
     execute: ['Bash'],
     all: ['Read', 'Write', 'Edit', 'Bash', 'Glob', 'Grep', 'WebSearch', 'WebFetch'],
+    // SECURITY: Safe tools that can be auto-approved
+    safe: ['Read', 'Glob', 'Grep', 'WebSearch', 'WebFetch'],
+    // SECURITY: Dangerous tools that require explicit approval
+    dangerous: ['Write', 'Edit', 'Bash'],
   },
 
-  // Default permission mode (auto-approve all as requested by user)
-  defaultPermissionMode: 'bypassPermissions' as const,
+  // SECURITY: Changed from 'bypassPermissions' to 'default'
+  // This requires explicit tool permissions instead of auto-approving everything
+  defaultPermissionMode: 'default' as const,
 
-  // Default query options
+  // Default query options - SECURITY: Only safe tools by default
   defaultQueryOptions: {
-    allowedTools: ['Read', 'Write', 'Edit', 'Bash', 'Glob', 'Grep', 'WebSearch', 'WebFetch'],
-    permissionMode: 'bypassPermissions' as const,
+    allowedTools: ['Read', 'Glob', 'Grep', 'WebSearch', 'WebFetch'],
+    permissionMode: 'default' as const,
     model: openRouterConfig.defaultModel,
   },
 
@@ -68,18 +71,64 @@ export const agentSdkConfig = {
   safety: {
     maxOutputLength: 100000,
     maxToolExecutions: 50,
+    // SECURITY: Expanded dangerous command blocklist
     dangerousCommands: [
+      // File system destruction
       'rm -rf /',
+      'rm -rf /*',
+      'rm -rf ~',
+      'rm -rf .',
+      'del /f /s /q',
       'format c:',
+      'format d:',
+      // Disk operations
       'dd if=/dev/zero',
+      'dd if=/dev/random',
       'mkfs',
+      'fdisk',
+      'parted',
+      // Fork bomb
       ':(){ :|:& };:',
+      // Network attacks
+      'nc -l',
+      'ncat -l',
+      'netcat',
+      // Privilege escalation
+      'sudo su',
+      'sudo -i',
+      'chmod 777',
+      'chown root',
+      // Crypto mining
+      'xmrig',
+      'minerd',
+      'cryptonight',
+      // Reverse shells
+      'bash -i >& /dev/tcp',
+      '/bin/bash -c',
+      'python -c "import socket',
+      'perl -e',
+      // Credential theft
+      'cat /etc/shadow',
+      'cat ~/.ssh/id_rsa',
+      'cat ~/.aws/credentials',
+      // Environment exfiltration
+      'printenv',
+      'env | curl',
+      'curl -d "$(env)"',
     ],
+    // SECURITY: Expanded blocked paths
     blockedPaths: [
       '/etc/passwd',
       '/etc/shadow',
+      '/etc/sudoers',
       '~/.ssh',
       '~/.aws',
+      '~/.gnupg',
+      '~/.config/gcloud',
+      '/root',
+      '/var/log',
+      'C:\\Windows\\System32',
+      'C:\\Users\\*\\AppData',
     ],
   },
 };

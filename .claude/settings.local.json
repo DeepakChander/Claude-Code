@@ -15,7 +15,12 @@
       "Bash(node dist/index.js:*)",
       "Bash(openanalyst --version:*)",
       "Bash(tree:*)",
-      "Bash(ssh:*)"
+      "Bash(ssh:*)",
+      "Bash(openanalyst auth login:*)",
+      "Bash(ls -la \"c:\\\\Users\\\\hp\\\\Desktop\\\\Cluade-Code\\\\backend\\\\src\"\" 2>/dev/null || echo \"Directory listing failed \")",
+      "Bash(scp:*)",
+      "Bash(ls:*)",
+      "Bash(git push:*)"
     ]
   }
 }

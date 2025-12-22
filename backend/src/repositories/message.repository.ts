@@ -15,6 +15,7 @@ export const create = async (
     model?: string;
     costUsd?: number;
     correlationId?: string;
+    reasoningContent?: string;
   }
 ): Promise<IMessage> => {
   try {
@@ -33,9 +34,10 @@ export const create = async (
       conversationId,
       role: input.role,
       content: input.content,
+      reasoningContent: input.reasoningContent || '',
       tokensInput: input.tokensInput || 0,
       tokensOutput: input.tokensOutput || 0,
-      modelUsed: input.model || 'anthropic/claude-sonnet-4',
+      modelUsed: input.model || 'deepseek/deepseek-r1',
       costUsd: input.costUsd || 0,
       toolCalls,
       correlationId: input.correlationId || '',
@@ -194,6 +196,7 @@ export const createAssistantMessage = async (
     model?: string;
     costUsd?: number;
     correlationId?: string;
+    reasoningContent?: string;
   } = {}
 ): Promise<IMessage> => {
   return create(conversationId, {

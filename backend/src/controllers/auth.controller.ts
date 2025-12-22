@@ -5,24 +5,63 @@ import logger from '../utils/logger';
 
 config();
 
-const JWT_SECRET = process.env.JWT_SECRET || 'default-secret-change-me';
+// SECURITY: Enforce JWT_SECRET is set properly
+const JWT_SECRET = process.env.JWT_SECRET;
+if (!JWT_SECRET || JWT_SECRET === 'default-secret-change-me') {
+  logger.error('FATAL: JWT_SECRET must be set to a secure value');
+  if (process.env.NODE_ENV === 'production') {
+    throw new Error('FATAL: JWT_SECRET must be set in production');
+  }
+}
+const SAFE_JWT_SECRET = JWT_SECRET || 'dev-secret-not-for-production';
 const JWT_EXPIRES_IN = '7d';
+
+// SECURITY: Master API key for token generation (required in production)
+const MASTER_API_KEY = process.env.MASTER_API_KEY;
 
 interface TokenRequest {
   userId?: string;
   email?: string;
+  apiKey?: string;
 }
 
 /**
- * Generate a test JWT token
+ * Generate a JWT token
  * POST /api/auth/token
  *
- * This is a test endpoint for development. In production,
- * replace with your actual authentication system.
+ * SECURITY: Requires MASTER_API_KEY to generate tokens.
+ * This prevents unauthorized token generation.
  */
 export const generateToken = async (req: Request, res: Response): Promise<void> => {
   try {
-    const { userId, email } = req.body as TokenRequest;
+    const { userId, email, apiKey } = req.body as TokenRequest;
+
+    // SECURITY: Validate master API key in production
+    if (process.env.NODE_ENV === 'production') {
+      if (!MASTER_API_KEY) {
+        logger.error('MASTER_API_KEY not configured');
+        res.status(500).json({
+          success: false,
+          error: {
+            code: 'CONFIG_ERROR',
+            message: 'Server not properly configured for token generation',
+          },
+        });
+        return;
+      }
+
+      if (apiKey !== MASTER_API_KEY) {
+        logger.warn('Invalid API key attempt', { userId, ip: req.ip });
+        res.status(401).json({
+          success: false,
+          error: {
+            code: 'UNAUTHORIZED',
+            message: 'Valid API key required for token generation',
+          },
+        });
+        return;
+      }
+    }
 
     // Validate input
     if (!userId) {
@@ -42,7 +81,7 @@ export const generateToken = async (req: Request, res: Response): Promise<void> 
         userId: userId,
         email: email || `${userId}@example.com`,
       },
-      JWT_SECRET,
+      SAFE_JWT_SECRET,
       { expiresIn: JWT_EXPIRES_IN }
     );
 
@@ -50,7 +89,7 @@ export const generateToken = async (req: Request, res: Response): Promise<void> 
     const expiresAt = new Date();
     expiresAt.setDate(expiresAt.getDate() + 7);
 
-    logger.info('Token generated', { userId, email });
+    logger.info('Token generated', { userId, email, ip: req.ip });
 
     res.json({
       success: true,
@@ -93,7 +132,7 @@ export const verifyToken = async (req: Request, res: Response): Promise<void> =>
       return;
     }
 
-    const decoded = jwt.verify(token, JWT_SECRET) as { userId: string; email?: string; exp: number };
+    const decoded = jwt.verify(token, SAFE_JWT_SECRET) as { userId: string; email?: string; exp: number };
 
     res.json({
       success: true,

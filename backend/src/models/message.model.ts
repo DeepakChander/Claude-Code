@@ -21,6 +21,7 @@ export interface IMessage extends Document {
   conversationId: Types.ObjectId | string;
   role: 'user' | 'assistant' | 'system';
   content: string;
+  reasoningContent: string; // For DeepSeek thinking/reasoning output
   tokensInput: number;
   tokensOutput: number;
   modelUsed: string;
@@ -75,6 +76,10 @@ const messageSchema = new Schema<IMessage>(
       type: String,
       required: true,
     },
+    reasoningContent: {
+      type: String,
+      default: '',
+    },
     tokensInput: {
       type: Number,
       default: 0,
@@ -85,7 +90,7 @@ const messageSchema = new Schema<IMessage>(
     },
     modelUsed: {
       type: String,
-      default: 'anthropic/claude-sonnet-4',
+      default: 'deepseek/deepseek-r1',
     },
     costUsd: {
       type: Number,
