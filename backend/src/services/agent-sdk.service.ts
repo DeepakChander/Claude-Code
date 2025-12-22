@@ -1035,16 +1035,19 @@ export const submitToolResults = async (
 
     // Find the last assistant message to verify tool_calls exist
     const lastAssistantMsg = [...messages].reverse().find(m => m.role === 'assistant');
-    const storedToolCallIds: string[] = [];
+    const storedToolCalls: Map<string, string> = new Map(); // id -> function name
 
     if (lastAssistantMsg?.tool_calls) {
       for (const tc of lastAssistantMsg.tool_calls) {
-        storedToolCallIds.push(tc.id);
+        storedToolCalls.set(tc.id, tc.function.name);
       }
     }
 
+    const storedToolCallIds = Array.from(storedToolCalls.keys());
+
     logger.info('Tool call ID comparison', {
       storedToolCallIds,
+      storedToolNames: Array.from(storedToolCalls.values()),
       submittedToolUseIds: toolResults.map(r => r.tool_use_id),
       match: storedToolCallIds.length > 0 && toolResults.every(r => storedToolCallIds.includes(r.tool_use_id)),
     });
@@ -1069,18 +1072,46 @@ export const submitToolResults = async (
       return;
     }
 
+    // Verify submitted tool IDs match stored tool calls
+    const missingIds = toolResults.filter(r => !storedToolCalls.has(r.tool_use_id));
+    if (missingIds.length > 0) {
+      logger.error('Tool result IDs do not match stored tool_calls', {
+        sessionId,
+        missingIds: missingIds.map(r => r.tool_use_id),
+        storedToolCallIds,
+      });
+      // Try to continue anyway - some providers may be lenient
+      logger.warn('Attempting to continue despite ID mismatch');
+    }
+
     // Add tool results as 'tool' role messages (OpenAI format)
+    // IMPORTANT: Include 'name' field which is required by some providers (Google/Gemini)
     for (const result of toolResults) {
+      const toolName = storedToolCalls.get(result.tool_use_id) || 'unknown';
       messages.push({
         role: 'tool',
         tool_call_id: result.tool_use_id,
         content: result.output,
+        name: toolName, // Required by some OpenRouter providers
       });
     }
 
     logger.info('Added tool results to messages', {
       newMessageCount: messages.length,
       toolResultIds: toolResults.map(r => r.tool_use_id),
+      toolNames: toolResults.map(r => storedToolCalls.get(r.tool_use_id)),
+    });
+
+    // Debug: Log the message structure being sent
+    logger.debug('Message structure for OpenRouter request', {
+      messages: messages.map((m, i) => ({
+        index: i,
+        role: m.role,
+        contentPreview: typeof m.content === 'string' ? m.content?.substring(0, 50) : '(null)',
+        hasToolCalls: !!(m as OpenAIMessage).tool_calls?.length,
+        toolCallId: (m as OpenAIMessage).tool_call_id,
+        name: (m as OpenAIMessage).name,
+      })),
     });
 
     const systemPrompt = buildSystemPrompt(workspacePath, options.systemPrompt || options.appendSystemPrompt);
