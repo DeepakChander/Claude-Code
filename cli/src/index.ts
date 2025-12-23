@@ -988,7 +988,7 @@ async function continueWithToolResults(
         sessionId,
         toolResults,
         projectId,
-        projectId,
+
         model,
         clientSkills: loadLocalSkills(workingDir),
       }),
