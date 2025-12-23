@@ -53,6 +53,94 @@ const getToken = (): string => {
   return token;
 };
 
+// Local skills interface
+interface ParsedSkill {
+  name: string;
+  description: string;
+  content: string;
+  allowedTools?: string[];
+}
+
+/**
+ * Ensure .claude/skills folder exists locally
+ */
+const ensureLocalSkillsFolder = (workingDir: string): void => {
+  const skillsDir = path.join(workingDir, '.claude', 'skills');
+  if (!fs.existsSync(skillsDir)) {
+    try {
+      fs.mkdirSync(skillsDir, { recursive: true });
+      // Create README
+      const readmePath = path.join(skillsDir, 'README.md');
+      fs.writeFileSync(readmePath, `# Claude Skills
+
+Add markdown files here to define skills. Each skill should exist in its own .md file.
+The file name (without extension) will be used as the skill name.
+
+Example format (skill-name.md):
+
+---
+description: This skill does something amazing
+allowed-tools: [Bash, Write]
+---
+
+# Skill Instructions
+
+When the user asks for X, do Y...
+`);
+    } catch (err) {
+      // Ignore errors if we can't create it (e.g. permission)
+    }
+  }
+};
+
+/**
+ * Load local skills from .claude/skills
+ */
+const loadLocalSkills = (workingDir: string): ParsedSkill[] => {
+  const skillsDir = path.join(workingDir, '.claude', 'skills');
+  if (!fs.existsSync(skillsDir)) return [];
+
+  const skills: ParsedSkill[] = [];
+  try {
+    const files = fs.readdirSync(skillsDir);
+    for (const file of files) {
+      if (file.toLowerCase().endsWith('.md') && file.toUpperCase() !== 'README.MD') {
+        try {
+          const content = fs.readFileSync(path.join(skillsDir, file), 'utf-8');
+
+          // Simple frontmatter parsing
+          const match = content.match(/^---\n([\s\S]*?)\n---\n([\s\S]*)$/);
+          if (match) {
+            const frontmatter = match[1];
+            const markdown = match[2];
+
+            // Parse frontmatter (simple key: value)
+            const descriptionMatch = frontmatter.match(/description:\s*(.*)/);
+            const toolsMatch = frontmatter.match(/allowed-tools:\s*\[(.*?)\]/);
+
+            const description = descriptionMatch ? descriptionMatch[1].trim() : '';
+            const allowedTools = toolsMatch
+              ? toolsMatch[1].split(',').map(t => t.trim().replace(/['"]/g, ''))
+              : undefined;
+
+            skills.push({
+              name: path.parse(file).name,
+              description,
+              content: markdown.trim(),
+              allowedTools
+            });
+          }
+        } catch (e) {
+          // Skip invalid files
+        }
+      }
+    }
+  } catch (e) {
+    // Ignore read errors
+  }
+  return skills;
+};
+
 // Make authenticated request
 const apiRequest = async (
   endpoint: string,
@@ -597,7 +685,17 @@ program
     };
 
     if (options.model) body.model = options.model;
+    if (options.model) body.model = options.model;
     if (options.tools) body.allowedTools = options.tools.split(',');
+
+    // Auto-init skills and load them
+    const cwd = process.cwd();
+    ensureLocalSkillsFolder(cwd);
+    const clientSkills = loadLocalSkills(cwd);
+    if (clientSkills.length > 0) {
+      body.clientSkills = clientSkills;
+      // console.log(chalk.gray(`Loaded ${clientSkills.length} local skills`));
+    }
 
     if (options.sync) {
       const spinner = ora('Running...').start();
@@ -890,7 +988,9 @@ async function continueWithToolResults(
         sessionId,
         toolResults,
         projectId,
+        projectId,
         model,
+        clientSkills: loadLocalSkills(workingDir),
       }),
     });
 
@@ -2127,6 +2227,13 @@ program
         };
         if (currentModel) requestBody.model = currentModel;
         if (currentTools.length > 0) requestBody.allowedTools = currentTools;
+
+        // Auto-init skills and load them for interactive chat
+        ensureLocalSkillsFolder(workingDir);
+        const clientSkills = loadLocalSkills(workingDir);
+        if (clientSkills.length > 0) {
+          requestBody.clientSkills = clientSkills;
+        }
 
         // Use server session ID for conversation continuation (avoids tool_use_id mismatch)
         // The server maintains the full conversation history with tool_use blocks

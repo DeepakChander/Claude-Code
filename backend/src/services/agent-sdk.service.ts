@@ -38,6 +38,14 @@ export interface SdkOptions {
   // Client-side conversation history (for resuming sessions)
   previousMessages?: Array<{ role: 'user' | 'assistant'; content: string }>;
 
+  // Client-side skills (for hybrid mode)
+  clientSkills?: Array<{
+    name: string;
+    description: string;
+    content: string;
+    allowedTools?: string[];
+  }>;
+
   // Advanced
   verbose?: boolean;
 }
@@ -121,7 +129,12 @@ Project structure created successfully with all requested files.
 /**
  * Build system prompt with TodoWrite instructions, phase behavior, and matched skills
  */
-const buildSystemPrompt = async (workspacePath: string, prompt?: string, customPrompt?: string): Promise<string> => {
+const buildSystemPrompt = async (
+  workspacePath: string,
+  prompt?: string,
+  customPrompt?: string,
+  clientSkills?: SdkOptions['clientSkills']
+): Promise<string> => {
   // Auto-create skills folder if not exists (on first query)
   try {
     await skillService.initializeSkillsFolder(workspacePath);
@@ -132,9 +145,24 @@ const buildSystemPrompt = async (workspacePath: string, prompt?: string, customP
   // Load and match skills for this prompt
   let skillContext = '';
   try {
-    const skills = await skillService.loadSkills(workspacePath);
-    if (prompt && skills.length > 0) {
-      const matchedSkills = skillService.matchSkills(prompt, skills);
+    const serverSkills = await skillService.loadSkills(workspacePath);
+
+    // Merge client skills if provided
+    const allSkills = [...serverSkills];
+    if (clientSkills && clientSkills.length > 0) {
+      const parsedClientSkills = clientSkills.map(s => ({
+        name: s.name,
+        description: s.description,
+        content: s.content,
+        allowedTools: s.allowedTools || [],
+        path: 'client-side',
+        type: 'project' as const
+      }));
+      allSkills.push(...parsedClientSkills);
+    }
+
+    if (prompt && allSkills.length > 0) {
+      const matchedSkills = skillService.matchSkills(prompt, allSkills);
       if (matchedSkills.length > 0) {
         skillContext = skillService.buildSkillContext(matchedSkills);
         logger.info('Skills matched for prompt', {
@@ -755,7 +783,7 @@ export const runChatStreaming = async (
       useReasoning,
     })}\n\n`);
 
-    const systemPrompt = await buildSystemPrompt(workspacePath, prompt, options.systemPrompt || options.appendSystemPrompt);
+    const systemPrompt = await buildSystemPrompt(workspacePath, prompt, options.systemPrompt || options.appendSystemPrompt, options.clientSkills);
 
     // Build request body - messages are already in OpenAI format
     const requestBody: Record<string, unknown> = {
@@ -1186,14 +1214,29 @@ export const submitToolResults = async (
       })),
     });
 
-    const systemPrompt = buildSystemPrompt(workspacePath, options.systemPrompt || options.appendSystemPrompt);
+    const systemPrompt = await buildSystemPrompt(workspacePath, undefined, options.systemPrompt || options.appendSystemPrompt, options.clientSkills);
 
     // Build request body - same format as runChatStreaming
+    // Sanitize messages to ensure only valid fields are sent to OpenRouter
+    const validMessages = messages.map(m => {
+      const msg: any = { role: m.role };
+
+      // Handle content - use empty string instead of null for max compatibility
+      msg.content = m.content === null || m.content === undefined ? '' : m.content;
+
+      // Only include valid properties
+      if (m.tool_calls) msg.tool_calls = m.tool_calls;
+      if (m.tool_call_id) msg.tool_call_id = m.tool_call_id;
+      if (m.name) msg.name = m.name;
+
+      return msg;
+    });
+
     const requestBody: Record<string, unknown> = {
       model,
       messages: [
         { role: 'system', content: systemPrompt },
-        ...messages,
+        ...validMessages,
       ],
       max_tokens: maxTokens,
       stream: true,

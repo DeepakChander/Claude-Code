@@ -20,6 +20,12 @@ interface AgentRequestBody {
   systemPrompt?: string;
   maxTurns?: number;
   conversationId?: string;
+  clientSkills?: Array<{
+    name: string;
+    description: string;
+    content: string;
+    allowedTools?: string[];
+  }>;
 }
 
 /**
@@ -1068,7 +1074,7 @@ export const getConversationDetails = async (req: AuthRequest, res: Response): P
  */
 export const runAgentChat = async (req: AuthRequest, res: Response): Promise<void> => {
   const userId = req.user!.userId;
-  const { prompt, projectId = 'default', model, systemPrompt, conversationId, messages } = req.body as AgentRequestBody & {
+  const { prompt, projectId = 'default', model, systemPrompt, conversationId, messages, clientSkills } = req.body as AgentRequestBody & {
     messages?: Array<{ role: 'user' | 'assistant'; content: string }>;
   };
 
@@ -1113,6 +1119,7 @@ export const runAgentChat = async (req: AuthRequest, res: Response): Promise<voi
       systemPrompt,
       resume: resumeSessionId,
       previousMessages: messages, // Pass client-side conversation history
+      clientSkills, // Pass client-side skills
     });
   } catch (error) {
     logger.error('Agent chat error', { userId, projectId, error: (error as Error).message });
@@ -1133,11 +1140,12 @@ export const runAgentChat = async (req: AuthRequest, res: Response): Promise<voi
  */
 export const submitToolResults = async (req: AuthRequest, res: Response): Promise<void> => {
   const userId = req.user!.userId;
-  const { sessionId, toolResults, projectId = 'default', model } = req.body as {
+  const { sessionId, toolResults, projectId = 'default', model, clientSkills } = req.body as {
     sessionId: string;
     toolResults: Array<{ tool_use_id: string; output: string; is_error: boolean }>;
     projectId?: string;
     model?: string;
+    clientSkills?: AgentRequestBody['clientSkills'];
   };
 
   if (!sessionId || !toolResults || !Array.isArray(toolResults)) {
@@ -1161,6 +1169,7 @@ export const submitToolResults = async (req: AuthRequest, res: Response): Promis
     // Submit tool results and continue conversation
     await sdkService.submitToolResults(sessionId, toolResults, workspace, res, {
       model,
+      clientSkills,
     });
   } catch (error) {
     logger.error('Submit tool results error', { userId, sessionId, error: (error as Error).message });
