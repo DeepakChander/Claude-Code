@@ -755,7 +755,7 @@ export const runChatStreaming = async (
       useReasoning,
     })}\n\n`);
 
-    const systemPrompt = buildSystemPrompt(workspacePath, options.systemPrompt || options.appendSystemPrompt);
+    const systemPrompt = await buildSystemPrompt(workspacePath, prompt, options.systemPrompt || options.appendSystemPrompt);
 
     // Build request body - messages are already in OpenAI format
     const requestBody: Record<string, unknown> = {
@@ -1466,7 +1466,7 @@ export const runChatStreamingForWebSocket = async (
       }
     }));
 
-    const systemPrompt = buildSystemPrompt(workspacePath);
+    const systemPrompt = await buildSystemPrompt(workspacePath, prompt);
 
     // Build request body
     const requestBody: Record<string, unknown> = {
