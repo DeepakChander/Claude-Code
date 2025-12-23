@@ -244,6 +244,57 @@ class WebSocketService {
   }
 
   /**
+   * Send terminal command to IDE for execution
+   * Used when AI requests a Bash command via WebSocket
+   */
+  sendTerminalCommand(
+    sessionId: string,
+    clientId: string,
+    commandId: string,
+    command: string,
+    workingDir: string
+  ): void {
+    const client = this.clients.get(clientId);
+
+    if (!client || client.ws.readyState !== 1) { // 1 = WebSocket.OPEN
+      logger.warn('Cannot send terminal command - client not connected', { clientId, sessionId });
+      return;
+    }
+
+    // Store pending command
+    this.pendingTerminalCommands.set(commandId, {
+      commandId,
+      command,
+      workingDir,
+      sessionId,
+      clientId,
+      timestamp: new Date()
+    });
+
+    // Send to IDE
+    client.ws.send(JSON.stringify({
+      type: 'terminal_command',
+      sessionId,
+      timestamp: new Date().toISOString(),
+      data: {
+        commandId,
+        command,
+        workingDir,
+        requiresApproval: true
+      }
+    }));
+
+    logger.info('Terminal command sent to IDE', { commandId, command, sessionId });
+  }
+
+  /**
+   * Get pending terminal command by ID
+   */
+  getPendingTerminalCommand(commandId: string) {
+    return this.pendingTerminalCommands.get(commandId);
+  }
+
+  /**
    * Generate unique client ID
    */
   private generateClientId(): string {
@@ -255,6 +306,16 @@ class WebSocketService {
     toolCallId: string;
     toolName: string;
     toolInput: Record<string, unknown>;
+    sessionId: string;
+    clientId: string;
+    timestamp: Date;
+  }> = new Map();
+
+  // Pending terminal commands for IDE execution
+  private pendingTerminalCommands: Map<string, {
+    commandId: string;
+    command: string;
+    workingDir: string;
     sessionId: string;
     clientId: string;
     timestamp: Date;
@@ -438,6 +499,138 @@ class WebSocketService {
             timestamp: new Date().toISOString(),
           }));
           break;
+
+        // Terminal relay events for IDE integration
+        case 'terminal_accept': {
+          // IDE accepted a terminal command
+          const termAcceptId = message.payload?.commandId;
+          const termPending = this.pendingTerminalCommands.get(termAcceptId);
+
+          if (termPending) {
+            logger.info('Terminal command accepted by IDE', {
+              commandId: termAcceptId,
+              command: termPending.command
+            });
+
+            // Send acknowledgment
+            client.ws.send(JSON.stringify({
+              type: 'terminal_accepted',
+              sessionId: termPending.sessionId,
+              timestamp: new Date().toISOString(),
+              data: { commandId: termAcceptId, status: 'executing' }
+            }));
+          }
+          break;
+        }
+
+        case 'terminal_reject': {
+          // IDE rejected a terminal command
+          const termRejectId = message.payload?.commandId;
+          const rejectReason = message.payload?.reason || 'User rejected command';
+          const termRejected = this.pendingTerminalCommands.get(termRejectId);
+
+          if (termRejected) {
+            logger.info('Terminal command rejected by IDE', {
+              commandId: termRejectId,
+              reason: rejectReason
+            });
+
+            // Broadcast rejection to session
+            this.broadcastToSession(termRejected.sessionId, {
+              type: 'task_failed',
+              sessionId: termRejected.sessionId,
+              timestamp: new Date().toISOString(),
+              data: {
+                message: `Command rejected: ${rejectReason}`,
+                error: rejectReason
+              }
+            } as TaskProgressEvent);
+
+            this.pendingTerminalCommands.delete(termRejectId);
+          }
+          break;
+        }
+
+        case 'terminal_output': {
+          // Real-time terminal output from IDE
+          const { commandId: outCmdId, output, stream } = message.payload || {};
+          const termOutput = this.pendingTerminalCommands.get(outCmdId);
+
+          if (termOutput) {
+            // Broadcast output to all session subscribers
+            this.broadcastToSession(termOutput.sessionId, {
+              type: 'task_started',
+              sessionId: termOutput.sessionId,
+              timestamp: new Date().toISOString(),
+              data: {
+                message: output,
+                currentTask: {
+                  id: outCmdId,
+                  content: `Running: ${termOutput.command}`,
+                  activeForm: output,
+                  status: 'in_progress',
+                  order: 0
+                }
+              }
+            } as TaskProgressEvent);
+          }
+
+          logger.debug('Terminal output received', { commandId: outCmdId, stream, outputLength: output?.length });
+          break;
+        }
+
+        case 'terminal_complete': {
+          // Terminal command completed in IDE
+          const { commandId: completeCmdId, exitCode, output: finalOutput } = message.payload || {};
+          const termComplete = this.pendingTerminalCommands.get(completeCmdId);
+
+          if (termComplete) {
+            const success = exitCode === 0;
+
+            logger.info('Terminal command completed', {
+              commandId: completeCmdId,
+              exitCode,
+              success,
+              command: termComplete.command
+            });
+
+            // Send completion event
+            client.ws.send(JSON.stringify({
+              type: 'terminal_result',
+              sessionId: termComplete.sessionId,
+              timestamp: new Date().toISOString(),
+              data: {
+                commandId: completeCmdId,
+                command: termComplete.command,
+                exitCode,
+                success,
+                output: finalOutput || ''
+              }
+            }));
+
+            // Broadcast task completion
+            this.broadcastToSession(termComplete.sessionId, {
+              type: success ? 'task_completed' : 'task_failed',
+              sessionId: termComplete.sessionId,
+              timestamp: new Date().toISOString(),
+              data: {
+                currentTask: {
+                  id: completeCmdId,
+                  content: termComplete.command,
+                  activeForm: `Exit code: ${exitCode}`,
+                  status: success ? 'completed' : 'failed',
+                  order: 0
+                },
+                message: success
+                  ? `Command completed successfully (exit code: ${exitCode})`
+                  : `Command failed (exit code: ${exitCode})`
+              }
+            } as TaskProgressEvent);
+
+            this.pendingTerminalCommands.delete(completeCmdId);
+          }
+          break;
+        }
 
         default:
           logger.debug('Unknown WebSocket message type', {
