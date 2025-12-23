@@ -164,6 +164,115 @@ async function askToolApproval(
   return { approved };
 }
 
+// Step detection patterns for thinking display
+const STEP_PATTERNS = [
+  /^(step\s*\d+[:\.]?\s*)/i,       // "Step 1:", "Step 2."
+  /^(\d+\.\s+)/,                    // "1. ", "2. "
+  /^(first[,:]?\s+)/i,              // "First,"
+  /^(next[,:]?\s+)/i,               // "Next,"
+  /^(then[,:]?\s+)/i,               // "Then,"
+  /^(now\s+i'?ll\s+)/i,             // "Now I'll"
+  /^(let\s+me\s+)/i,                // "Let me"
+  /^(i'?ll\s+start\s+)/i,           // "I'll start"
+  /^(finally[,:]?\s+)/i,            // "Finally,"
+  /^(to\s+complete\s+)/i,           // "To complete"
+];
+
+// Planning/analysis patterns
+const PLANNING_PATTERNS = [
+  /i'?ll\s+create/i,
+  /i\s+need\s+to/i,
+  /let\s+me\s+plan/i,
+  /let\s+me\s+analyze/i,
+  /i'?ll\s+set\s+up/i,
+  /i'?ll\s+implement/i,
+  /i'?ll\s+add/i,
+  /i'?ll\s+build/i,
+  /i'?ll\s+make/i,
+];
+
+// Track current step number
+let currentStepNumber = 0;
+let lastOutputWasStep = false;
+let thinkingShown = false;
+
+/**
+ * Reset step tracking for new conversation
+ */
+function resetThinkingState(): void {
+  currentStepNumber = 0;
+  lastOutputWasStep = false;
+  thinkingShown = false;
+}
+
+/**
+ * Show thinking indicator at start
+ */
+function showThinkingIndicator(): void {
+  if (!thinkingShown) {
+    console.log(chalk.gray('\n💭 Thinking...\n'));
+    thinkingShown = true;
+  }
+}
+
+/**
+ * Check if text indicates a new step
+ */
+function isStepIndicator(text: string): boolean {
+  const trimmed = text.trim();
+  return STEP_PATTERNS.some(pattern => pattern.test(trimmed));
+}
+
+/**
+ * Check if text is planning/analysis content
+ */
+function isPlanningContent(text: string): boolean {
+  return PLANNING_PATTERNS.some(pattern => pattern.test(text));
+}
+
+/**
+ * Format text with thinking display enhancements
+ */
+function formatThinkingOutput(text: string, accumulatedText: string): string {
+  // Skip empty text
+  if (!text.trim()) return text;
+
+  // Check if this starts a new step
+  if (isStepIndicator(accumulatedText)) {
+    currentStepNumber++;
+    lastOutputWasStep = true;
+
+    // Format as step header
+    const stepHeader = chalk.cyan(`\n📋 Step ${currentStepNumber}:`);
+    // Remove the step indicator from displayed text
+    let cleanText = accumulatedText;
+    for (const pattern of STEP_PATTERNS) {
+      cleanText = cleanText.replace(pattern, '');
+    }
+    return stepHeader + chalk.white(' ' + cleanText.trim());
+  }
+
+  // Check for planning/analysis content
+  if (isPlanningContent(accumulatedText) && !lastOutputWasStep) {
+    return chalk.gray(`   └─ ${text}`);
+  }
+
+  // Regular text
+  return text;
+}
+
+/**
+ * Show tool completion message
+ */
+function showToolCompletion(toolName: string, description: string, success: boolean): void {
+  if (success) {
+    console.log(chalk.green(`\n✓ Completed: ${description}`));
+    console.log(chalk.gray('   └─ Moving to next step...\n'));
+  } else {
+    console.log(chalk.red(`\n✗ Failed: ${description}`));
+  }
+}
+
 // Process SSE stream
 const processStream = async (
   response: FetchResponse,
@@ -785,8 +894,10 @@ async function continueWithToolResults(
 
         if (result.success) {
           console.log(chalk.green(`  ✓ ${getToolDescription(tool.name, tool.input)}`));
+          showToolCompletion(tool.name, getToolDescription(tool.name, tool.input), true);
         } else {
           console.log(chalk.red(`  ✗ ${result.error}`));
+          showToolCompletion(tool.name, getToolDescription(tool.name, tool.input), false);
         }
 
         newToolResults.push({
@@ -2005,8 +2116,11 @@ program
 
                 if (result.success) {
                   console.log(chalk.green(`  ✓ ${getToolDescription(tool.name, tool.input)}`));
+                  // Show completion message for better step visibility
+                  showToolCompletion(tool.name, getToolDescription(tool.name, tool.input), true);
                 } else {
                   console.log(chalk.red(`  ✗ ${result.error}`));
+                  showToolCompletion(tool.name, getToolDescription(tool.name, tool.input), false);
                 }
 
                 toolResults.push({
