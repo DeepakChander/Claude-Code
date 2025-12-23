@@ -935,6 +935,7 @@ interface SessionMessage {
 // Session storage interface
 interface StoredSession {
   id: string;
+  userId: string;
   title: string;
   projectId: string;
   workingDir: string;
@@ -961,6 +962,17 @@ const generateSessionTitle = (messages: SessionMessage[]): string => {
 // Generate a unique session ID
 const generateSessionId = (): string => {
   return `session-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
+};
+
+// Helper: Get User ID from Token (Simple Decode)
+const getUserIdFromToken = (token: string): string => {
+  try {
+    const payload = token.split('.')[1];
+    const decoded = JSON.parse(Buffer.from(payload, 'base64').toString());
+    return decoded.userId;
+  } catch {
+    return 'unknown-user';
+  }
 };
 
 // Helper function to continue conversation after local tool execution
@@ -1310,6 +1322,26 @@ program
         continue;
       }
 
+      // ==================== /login ====================
+      if (input.startsWith('/login ')) {
+        const token = input.slice(7).trim();
+        if (token) {
+          config.set('token', token);
+          const userId = getUserIdFromToken(token);
+          console.log(chalk.green(`\n  ✓ Logged in as: ${userId}`));
+          console.log(chalk.gray('  Context refreshed.\n'));
+
+          // Clear current session context
+          currentSessionId = generateSessionId();
+          serverSessionId = null;
+          sessionStats = { tokensInput: 0, tokensOutput: 0, costUsd: 0, messages: 0 };
+          conversationHistory = [];
+        } else {
+          console.log(chalk.yellow('Usage: /login <token>'));
+        }
+        continue;
+      }
+
       if (input === '/status') {
         console.log(chalk.cyan('\n╭─────────────────────────────────────────╮'));
         console.log(chalk.cyan('│') + chalk.bold('            Session Status              ') + chalk.cyan('│'));
@@ -1362,9 +1394,11 @@ program
         if (sessionStats.messages > 0 && conversationHistory.length > 0) {
           const sessions = (sessionsStore.get('sessions') as StoredSession[]) || [];
           const existingIndex = sessions.findIndex(s => s.id === currentSessionId);
+          const currentToken = config.get('token') as string;
 
           const sessionData: StoredSession = {
             id: currentSessionId,
+            userId: getUserIdFromToken(currentToken),
             title: generateSessionTitle(conversationHistory),
             projectId: currentProject,
             workingDir,
@@ -1434,7 +1468,12 @@ program
       // ==================== /resume ====================
       // Interactive resume (no ID provided)
       if (input === '/resume') {
-        const sessions = (sessionsStore.get('sessions') as StoredSession[]) || [];
+        const allSessions = (sessionsStore.get('sessions') as StoredSession[]) || [];
+        const currentToken = config.get('token') as string;
+        const currentUserId = getUserIdFromToken(currentToken);
+
+        // Filter sessions by user
+        const sessions = allSessions.filter(s => s.userId === currentUserId);
 
         if (sessions.length === 0) {
           console.log(chalk.yellow('\n  No previous sessions found.\n'));
@@ -1446,6 +1485,7 @@ program
           const existingIndex = sessions.findIndex(s => s.id === currentSessionId);
           const sessionData: StoredSession = {
             id: currentSessionId,
+            userId: getUserIdFromToken(config.get('token') as string),
             title: generateSessionTitle(conversationHistory),
             projectId: currentProject,
             workingDir,
@@ -1539,6 +1579,7 @@ program
           const existingIndex = sessions.findIndex(s => s.id === currentSessionId);
           const sessionData: StoredSession = {
             id: currentSessionId,
+            userId: getUserIdFromToken(config.get('token') as string),
             title: generateSessionTitle(conversationHistory),
             projectId: currentProject,
             workingDir,
@@ -2406,6 +2447,7 @@ program
             const existingIndex = sessions.findIndex(s => s.id === currentSessionId);
             const sessionData: StoredSession = {
               id: currentSessionId,
+              userId: getUserIdFromToken(config.get('token') as string),
               title: generateSessionTitle(conversationHistory),
               projectId: currentProject,
               workingDir,
@@ -2523,6 +2565,7 @@ program
             const existingIndex = sessions.findIndex(s => s.id === currentSessionId);
             const sessionData: StoredSession = {
               id: currentSessionId,
+              userId: getUserIdFromToken(config.get('token') as string),
               title: generateSessionTitle(conversationHistory),
               projectId: currentProject,
               workingDir,
