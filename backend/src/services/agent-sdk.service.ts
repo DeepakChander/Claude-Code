@@ -4,6 +4,7 @@ import { config } from 'dotenv';
 import logger from '../utils/logger';
 import { openRouterConfig, getModelPricing, supportsReasoning } from '../config/openrouter';
 import { toolDefinitions, executeTool } from './tools.service';
+import { skillService } from './skill.service';
 
 config();
 
@@ -118,13 +119,33 @@ Project structure created successfully with all requested files.
 `;
 
 /**
- * Build system prompt with TodoWrite instructions and phase behavior
+ * Build system prompt with TodoWrite instructions, phase behavior, and matched skills
  */
-const buildSystemPrompt = (workspacePath: string, customPrompt?: string): string => {
+const buildSystemPrompt = async (workspacePath: string, prompt?: string, customPrompt?: string): Promise<string> => {
+  // Load and match skills for this prompt
+  let skillContext = '';
+  try {
+    const skills = await skillService.loadSkills(workspacePath);
+    if (prompt && skills.length > 0) {
+      const matchedSkills = skillService.matchSkills(prompt, skills);
+      if (matchedSkills.length > 0) {
+        skillContext = skillService.buildSkillContext(matchedSkills);
+        logger.info('Skills matched for prompt', {
+          count: matchedSkills.length,
+          skills: matchedSkills.map(m => m.skill.name)
+        });
+      }
+    }
+  } catch (error) {
+    logger.debug('Failed to load skills', { error: (error as Error).message });
+  }
+
   const basePrompt = `You are Claude, an AI coding assistant. You have access to tools to read, write, and edit files, and run bash commands.
 Current working directory: ${workspacePath}
 
 ${PHASE_BEHAVIOR_PROMPT}
+
+${skillContext}
 
 ## CRITICAL: Task Planning with TodoWrite
 
@@ -158,6 +179,7 @@ Then mark first task as in_progress before working on it.
 
   return customPrompt || basePrompt;
 };
+
 
 /**
  * Convert tool definitions to OpenAI function format
@@ -270,7 +292,7 @@ export const runSdkStreaming = async (
       session_id: sessionId,
     })}\n\n`);
 
-    const systemPrompt = buildSystemPrompt(workspacePath, options.systemPrompt || options.appendSystemPrompt);
+    const systemPrompt = await buildSystemPrompt(workspacePath, prompt, options.systemPrompt || options.appendSystemPrompt);
 
     // Agentic loop - keep going until Claude stops using tools
     let turn = 0;
@@ -511,7 +533,7 @@ export const runSdkSync = async (
     // Add new user message
     messages.push({ role: 'user', content: prompt });
 
-    const systemPrompt = buildSystemPrompt(workspacePath, options.systemPrompt || options.appendSystemPrompt);
+    const systemPrompt = await buildSystemPrompt(workspacePath, prompt, options.systemPrompt || options.appendSystemPrompt);
 
     let totalTokensInput = 0;
     let totalTokensOutput = 0;
