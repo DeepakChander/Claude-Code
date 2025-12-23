@@ -93,8 +93,72 @@ When the user asks for X, do Y...
   }
 };
 
+// Helper for recursive file scanning
+const getAllFiles = (dir: string, fileList: string[] = []): string[] => {
+  const files = fs.readdirSync(dir);
+  for (const file of files) {
+    const filePath = path.join(dir, file);
+    if (fs.statSync(filePath).isDirectory()) {
+      getAllFiles(filePath, fileList);
+    } else {
+      fileList.push(filePath);
+    }
+  }
+  return fileList;
+};
+
+interface ParsedCommand {
+  name: string;
+  description: string;
+  content: string;
+}
+
 /**
- * Load local skills from .claude/skills
+ * Load local commands from .claude/commands
+ */
+const loadLocalCommands = (workingDir: string): ParsedCommand[] => {
+  const commandsDir = path.join(workingDir, '.claude', 'commands');
+  if (!fs.existsSync(commandsDir)) return [];
+
+  const commands: ParsedCommand[] = [];
+  try {
+    const files = getAllFiles(commandsDir);
+    for (const filePath of files) {
+      if (filePath.toLowerCase().endsWith('.md')) {
+        try {
+          const content = fs.readFileSync(filePath, 'utf-8');
+          const fileName = path.parse(filePath).name;
+
+          // Simple frontmatter parsing
+          const match = content.match(/^---\n([\s\S]*?)\n---\n([\s\S]*)$/);
+          let description = '';
+          let promptContent = content;
+
+          if (match) {
+            const frontmatter = match[1];
+            promptContent = match[2].trim();
+            const descriptionMatch = frontmatter.match(/description:\s*(.*)/);
+            description = descriptionMatch ? descriptionMatch[1].trim() : '';
+          }
+
+          commands.push({
+            name: fileName, // e.g., "streak" for streak.md
+            description,
+            content: promptContent
+          });
+        } catch (e) {
+          // Skip invalid
+        }
+      }
+    }
+  } catch (e) {
+    // Ignore
+  }
+  return commands;
+};
+
+/**
+ * Load local skills from .claude/skills (Recursive)
  */
 const loadLocalSkills = (workingDir: string): ParsedSkill[] => {
   const skillsDir = path.join(workingDir, '.claude', 'skills');
@@ -102,11 +166,12 @@ const loadLocalSkills = (workingDir: string): ParsedSkill[] => {
 
   const skills: ParsedSkill[] = [];
   try {
-    const files = fs.readdirSync(skillsDir);
-    for (const file of files) {
-      if (file.toLowerCase().endsWith('.md') && file.toUpperCase() !== 'README.MD') {
+    const files = getAllFiles(skillsDir);
+    for (const filePath of files) {
+      const fileName = path.basename(filePath);
+      if (fileName.toLowerCase().endsWith('.md') && fileName.toUpperCase() !== 'README.MD') {
         try {
-          const content = fs.readFileSync(path.join(skillsDir, file), 'utf-8');
+          const content = fs.readFileSync(filePath, 'utf-8');
 
           // Simple frontmatter parsing
           const match = content.match(/^---\n([\s\S]*?)\n---\n([\s\S]*)$/);
@@ -114,17 +179,27 @@ const loadLocalSkills = (workingDir: string): ParsedSkill[] => {
             const frontmatter = match[1];
             const markdown = match[2];
 
-            // Parse frontmatter (simple key: value)
+            // Parse frontmatter
             const descriptionMatch = frontmatter.match(/description:\s*(.*)/);
             const toolsMatch = frontmatter.match(/allowed-tools:\s*\[(.*?)\]/);
+            const nameMatch = frontmatter.match(/name:\s*(.*)/); // Allow override name
 
             const description = descriptionMatch ? descriptionMatch[1].trim() : '';
             const allowedTools = toolsMatch
               ? toolsMatch[1].split(',').map(t => t.trim().replace(/['"]/g, ''))
               : undefined;
 
+            // Name defaults to file name (without extension), or parent folder name if it is SKILL.md
+            let skillName = path.parse(fileName).name;
+            if (skillName.toUpperCase() === 'SKILL') {
+              skillName = path.basename(path.dirname(filePath));
+            }
+            if (nameMatch) {
+              skillName = nameMatch[1].trim();
+            }
+
             skills.push({
-              name: path.parse(file).name,
+              name: skillName,
               description,
               content: markdown.trim(),
               allowedTools
@@ -1236,7 +1311,7 @@ program
     let lastWasContinue = false;
 
     while (true) {
-      const { input } = await inquirer.prompt([{
+      let { input } = await inquirer.prompt([{
         type: 'input',
         name: 'input',
         message: lastWasContinue ? chalk.yellow('continue>') : chalk.green('>'),
@@ -2251,11 +2326,31 @@ program
         process.exit(0);
       }
 
-      // Handle unknown commands
+      // Handle unknown commands (or custom commands)
       if (input.startsWith('/')) {
-        console.log(chalk.yellow(`Unknown command: ${input}`));
-        console.log(chalk.gray('Type /help for available commands.\n'));
-        continue;
+        // Check for local custom commands
+        const cmdName = input.trim().split(' ')[0].substring(1); // remove '/'
+        const localCommands = loadLocalCommands(workingDir);
+        const customCommand = localCommands.find(c => c.name === cmdName);
+
+        if (customCommand) {
+          console.log(chalk.cyan(`  ✓ Executing command: /${customCommand.name}`));
+          // Treat content as prompt
+          conversationHistory.push({
+            role: 'user',
+            content: customCommand.content, // Instructions from the command file
+            timestamp: new Date().toISOString(),
+          });
+          // Proceed to execute tool logic below (useLocalTools block)
+          // We set input = customCommand.content to fallback? No, conversationHistory is what matters.
+          // But the logic below uses 'input' variable. Let's redirect input.
+          input = customCommand.content;
+          // Continue execution flow...
+        } else {
+          console.log(chalk.yellow(`Unknown command: ${input}`));
+          console.log(chalk.gray('Type /help for available commands.\n'));
+          continue;
+        }
       }
 
       if (!input.trim()) continue;
