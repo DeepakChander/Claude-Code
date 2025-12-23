@@ -989,9 +989,31 @@ async function continueWithToolResults(
 
         if (result.success) {
           console.log(chalk.green(`  ✓ ${getToolDescription(tool.name, tool.input)}`));
+
+          // Show Bash command output in a terminal-style box
+          if (tool.name === 'Bash' && result.output) {
+            console.log(chalk.cyan('\n┌─ Terminal Output ─────────────────────────────────────────┐'));
+            const outputLines = result.output.split('\n');
+            outputLines.forEach((line: string) => {
+              console.log(chalk.white(`│ ${line}`));
+            });
+            console.log(chalk.cyan('└───────────────────────────────────────────────────────────┘\n'));
+          }
+
           showToolCompletion(tool.name, getToolDescription(tool.name, tool.input), true);
         } else {
           console.log(chalk.red(`  ✗ ${result.error}`));
+
+          // Show error output for failed commands
+          if (tool.name === 'Bash' && result.output) {
+            console.log(chalk.red('\n┌─ Error Output ────────────────────────────────────────────┐'));
+            const outputLines = result.output.split('\n');
+            outputLines.forEach((line: string) => {
+              console.log(chalk.red(`│ ${line}`));
+            });
+            console.log(chalk.red('└───────────────────────────────────────────────────────────┘\n'));
+          }
+
           showToolCompletion(tool.name, getToolDescription(tool.name, tool.input), false);
         }
 
@@ -2211,10 +2233,32 @@ program
 
                 if (result.success) {
                   console.log(chalk.green(`  ✓ ${getToolDescription(tool.name, tool.input)}`));
+
+                  // Show Bash command output in a terminal-style box
+                  if (tool.name === 'Bash' && result.output) {
+                    console.log(chalk.cyan('\n┌─ Terminal Output ─────────────────────────────────────────┐'));
+                    const outputLines = result.output.split('\n');
+                    outputLines.forEach((line: string) => {
+                      console.log(chalk.white(`│ ${line}`));
+                    });
+                    console.log(chalk.cyan('└───────────────────────────────────────────────────────────┘\n'));
+                  }
+
                   // Show completion message for better step visibility
                   showToolCompletion(tool.name, getToolDescription(tool.name, tool.input), true);
                 } else {
                   console.log(chalk.red(`  ✗ ${result.error}`));
+
+                  // Show error output for failed commands
+                  if (tool.name === 'Bash' && result.output) {
+                    console.log(chalk.red('\n┌─ Error Output ────────────────────────────────────────────┐'));
+                    const outputLines = result.output.split('\n');
+                    outputLines.forEach((line: string) => {
+                      console.log(chalk.red(`│ ${line}`));
+                    });
+                    console.log(chalk.red('└───────────────────────────────────────────────────────────┘\n'));
+                  }
+
                   showToolCompletion(tool.name, getToolDescription(tool.name, tool.input), false);
                 }
 
