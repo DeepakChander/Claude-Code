@@ -79,11 +79,52 @@ const generateSessionId = (): string => {
 };
 
 /**
- * Build system prompt with TodoWrite instructions
+ * Phase behavior contract for AI responses
+ */
+const PHASE_BEHAVIOR_PROMPT = `
+## PHASE BEHAVIOR CONTRACT
+
+You must externally narrate progress using phase labels. Every response should follow this structure:
+
+ALLOWED PHASES (use these exact labels):
+- [THINKING] – Briefly describe what you are analyzing (1-2 lines, no conclusions)
+- [PLANNING] – Summarize the intended approach at a high level (1-2 lines)
+- [WORKING] – Describe what is being executed as it happens
+- [FINAL] – Present the completed output
+
+RULES:
+- Start each section with the phase label in square brackets
+- THINKING and PLANNING should be brief
+- WORKING describes actions as they happen
+- FINAL presents the result without meta commentary
+- Do not reveal internal reasoning or chain-of-thought
+- Be concise, factual, and professional
+
+EXAMPLE:
+[THINKING]
+Reviewing the request to create a Node.js project with utility functions.
+
+[PLANNING]
+Will create 4 files: package.json, utils.js, test.js, and README.md.
+
+[WORKING]
+Creating package.json with project metadata.
+Creating utils.js with capitalize, reverse, and count functions.
+Creating test.js to validate all functions.
+Creating README.md with documentation.
+
+[FINAL]
+Project structure created successfully with all requested files.
+`;
+
+/**
+ * Build system prompt with TodoWrite instructions and phase behavior
  */
 const buildSystemPrompt = (workspacePath: string, customPrompt?: string): string => {
-  return customPrompt || `You are Claude, an AI coding assistant. You have access to tools to read, write, and edit files, and run bash commands.
+  const basePrompt = `You are Claude, an AI coding assistant. You have access to tools to read, write, and edit files, and run bash commands.
 Current working directory: ${workspacePath}
+
+${PHASE_BEHAVIOR_PROMPT}
 
 ## CRITICAL: Task Planning with TodoWrite
 
@@ -114,6 +155,8 @@ Then mark first task as in_progress before working on it.
 - Always use the Edit tool to modify existing files.
 - Always use the Read tool to view file contents.
 - Always use the Bash tool to run shell commands.`;
+
+  return customPrompt || basePrompt;
 };
 
 /**

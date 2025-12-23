@@ -16,12 +16,20 @@ export interface IToolResult {
   isError?: boolean;
 }
 
+export interface IPhases {
+  thinking?: string;
+  planning?: string;
+  working?: string;
+  final?: string;
+}
+
 export interface IMessage extends Document {
   messageId: string;
   conversationId: Types.ObjectId | string;
   role: 'user' | 'assistant' | 'system';
   content: string;
   reasoningContent: string; // For DeepSeek thinking/reasoning output
+  phases: IPhases; // For phase-based responses (THINKING/PLANNING/WORKING/FINAL)
   tokensInput: number;
   tokensOutput: number;
   modelUsed: string;
@@ -79,6 +87,12 @@ const messageSchema = new Schema<IMessage>(
     reasoningContent: {
       type: String,
       default: '',
+    },
+    phases: {
+      thinking: { type: String, default: '' },
+      planning: { type: String, default: '' },
+      working: { type: String, default: '' },
+      final: { type: String, default: '' },
     },
     tokensInput: {
       type: Number,

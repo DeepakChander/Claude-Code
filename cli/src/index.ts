@@ -230,12 +230,99 @@ function isPlanningContent(text: string): boolean {
   return PLANNING_PATTERNS.some(pattern => pattern.test(text));
 }
 
+// Phase detection patterns
+const PHASE_PATTERNS = {
+  thinking: /\[THINKING\]/i,
+  planning: /\[PLANNING\]/i,
+  working: /\[WORKING\]/i,
+  final: /\[FINAL\]/i,
+};
+
+type Phase = 'thinking' | 'planning' | 'working' | 'final' | 'text';
+
+/**
+ * Detect phase from text content
+ */
+function detectPhase(text: string): Phase {
+  if (PHASE_PATTERNS.thinking.test(text)) return 'thinking';
+  if (PHASE_PATTERNS.planning.test(text)) return 'planning';
+  if (PHASE_PATTERNS.working.test(text)) return 'working';
+  if (PHASE_PATTERNS.final.test(text)) return 'final';
+  return 'text';
+}
+
+/**
+ * Clean phase markers from text
+ */
+function cleanPhaseMarkers(text: string): string {
+  return text
+    .replace(/\[THINKING\]/gi, '')
+    .replace(/\[PLANNING\]/gi, '')
+    .replace(/\[WORKING\]/gi, '')
+    .replace(/\[FINAL\]/gi, '')
+    .trim();
+}
+
+// Track current phase for styling
+let currentPhase: Phase = 'text';
+let phaseStarted = false;
+
+/**
+ * Display phase content with appropriate styling
+ */
+function displayPhaseContent(content: string): void {
+  const phase = detectPhase(content);
+  const cleanContent = cleanPhaseMarkers(content);
+
+  // Skip empty content
+  if (!cleanContent) return;
+
+  // Detect phase change
+  if (phase !== 'text' && phase !== currentPhase) {
+    currentPhase = phase;
+    phaseStarted = true;
+
+    // Print phase header
+    switch (phase) {
+      case 'thinking':
+        console.log(chalk.gray.italic('\n💭 [THINKING]'));
+        break;
+      case 'planning':
+        console.log(chalk.gray('\n📋 [PLANNING]'));
+        break;
+      case 'working':
+        console.log(chalk.white('\n⚡ [WORKING]'));
+        break;
+      case 'final':
+        console.log(chalk.white('\n✅ [FINAL]'));
+        break;
+    }
+  }
+
+  // Display content with phase-appropriate styling
+  if (currentPhase === 'thinking' || currentPhase === 'planning') {
+    // Light gray, italic for thinking/planning
+    process.stdout.write(chalk.gray.italic(cleanContent));
+  } else {
+    // Normal white for working/final
+    process.stdout.write(cleanContent);
+  }
+}
+
 /**
  * Format text with thinking display enhancements
  */
 function formatThinkingOutput(text: string, accumulatedText: string): string {
   // Skip empty text
   if (!text.trim()) return text;
+
+  // Check for phase markers and apply styling
+  const phase = detectPhase(accumulatedText);
+  const cleanText = cleanPhaseMarkers(text);
+
+  if (phase === 'thinking' || phase === 'planning') {
+    return chalk.gray.italic(cleanText);
+  }
 
   // Check if this starts a new step
   if (isStepIndicator(accumulatedText)) {
@@ -245,11 +332,11 @@ function formatThinkingOutput(text: string, accumulatedText: string): string {
     // Format as step header
     const stepHeader = chalk.cyan(`\n📋 Step ${currentStepNumber}:`);
     // Remove the step indicator from displayed text
-    let cleanText = accumulatedText;
+    let stepCleanText = accumulatedText;
     for (const pattern of STEP_PATTERNS) {
-      cleanText = cleanText.replace(pattern, '');
+      stepCleanText = stepCleanText.replace(pattern, '');
     }
-    return stepHeader + chalk.white(' ' + cleanText.trim());
+    return stepHeader + chalk.white(' ' + stepCleanText.trim());
   }
 
   // Check for planning/analysis content
@@ -259,6 +346,14 @@ function formatThinkingOutput(text: string, accumulatedText: string): string {
 
   // Regular text
   return text;
+}
+
+/**
+ * Reset phase state for new conversation
+ */
+function resetPhaseState(): void {
+  currentPhase = 'text';
+  phaseStarted = false;
 }
 
 /**
