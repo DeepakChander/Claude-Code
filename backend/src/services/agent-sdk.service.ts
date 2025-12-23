@@ -122,6 +122,13 @@ Project structure created successfully with all requested files.
  * Build system prompt with TodoWrite instructions, phase behavior, and matched skills
  */
 const buildSystemPrompt = async (workspacePath: string, prompt?: string, customPrompt?: string): Promise<string> => {
+  // Auto-create skills folder if not exists (on first query)
+  try {
+    await skillService.initializeSkillsFolder(workspacePath);
+  } catch (error) {
+    logger.debug('Could not initialize skills folder', { error: (error as Error).message });
+  }
+
   // Load and match skills for this prompt
   let skillContext = '';
   try {

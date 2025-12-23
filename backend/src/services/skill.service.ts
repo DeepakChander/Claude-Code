@@ -61,6 +61,60 @@ class SkillService {
     }
 
     /**
+     * Initialize skills folder in project directory
+     * Called automatically on first query to auto-create the folder structure
+     */
+    async initializeSkillsFolder(projectPath: string): Promise<string> {
+        const skillsDir = path.join(projectPath, '.claude', 'skills');
+
+        if (!fs.existsSync(skillsDir)) {
+            fs.mkdirSync(skillsDir, { recursive: true });
+            logger.info('Skills folder auto-created', { path: skillsDir });
+
+            // Create a README.md to explain skills
+            const readmePath = path.join(skillsDir, 'README.md');
+            fs.writeFileSync(readmePath, `# Agent Skills
+
+Place your custom skills here. Each skill should be in its own folder with a SKILL.md file.
+
+## Structure
+\`\`\`
+.claude/skills/
+├── my-skill/
+│   └── SKILL.md
+└── another-skill/
+    ├── SKILL.md
+    └── helpers.py
+\`\`\`
+
+## SKILL.md Format
+\`\`\`yaml
+---
+name: skill-name
+description: Brief description. Use when X happens.
+allowed-tools: Read, Bash, Grep  # optional - restrict tools
+---
+# Skill Name
+
+## Instructions
+Step-by-step guidance for the AI...
+
+## Examples
+Show concrete examples...
+\`\`\`
+
+## Quick Start
+
+1. Create a folder: \`mkdir my-skill\`
+2. Create SKILL.md with the format above
+3. The AI will automatically use your skill when relevant!
+`, 'utf-8');
+        }
+
+        return skillsDir;
+    }
+
+    /**
      * Load all skills from disk
      */
     async loadSkills(projectPath: string): Promise<ParsedSkill[]> {

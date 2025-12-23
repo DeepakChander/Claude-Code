@@ -217,4 +217,87 @@ router.delete('/:name', async (req: Request, res: Response): Promise<void> => {
     }
 });
 
+/**
+ * POST /api/skills/upload
+ * Upload a skill file to the project's skills folder
+ */
+router.post('/upload', async (req: Request, res: Response): Promise<void> => {
+    try {
+        const { skillName, fileName, content, projectPath } = req.body;
+
+        if (!skillName || !fileName || !content) {
+            res.status(400).json({
+                success: false,
+                error: 'Missing required fields: skillName, fileName, content',
+            });
+            return;
+        }
+
+        // Validate skill name format
+        if (!/^[a-z0-9-]+$/.test(skillName) || skillName.length > 64) {
+            res.status(400).json({
+                success: false,
+                error: 'Invalid skillName: must be lowercase letters, numbers, and hyphens only (max 64 chars)',
+            });
+            return;
+        }
+
+        const basePath = projectPath || process.cwd();
+
+        // Ensure skills folder exists
+        await skillService.initializeSkillsFolder(basePath);
+
+        // Create skill directory
+        const skillDir = await skillService.createSkillDirectory(basePath, skillName);
+
+        // Write the file
+        const fs = await import('fs');
+        const filePath = `${skillDir}/${fileName}`;
+        fs.writeFileSync(filePath, content, 'utf-8');
+
+        // Clear cache to reload skills
+        skillService.clearCache();
+
+        logger.info('Skill file uploaded', { skillName, fileName, path: filePath });
+
+        res.json({
+            success: true,
+            message: `File uploaded to ${filePath}`,
+            path: filePath,
+            skillDir,
+        });
+    } catch (error) {
+        logger.error('Failed to upload skill file', { error: (error as Error).message });
+        res.status(500).json({
+            success: false,
+            error: (error as Error).message,
+        });
+    }
+});
+
+/**
+ * POST /api/skills/init
+ * Initialize skills folder in a project directory
+ */
+router.post('/init', async (req: Request, res: Response): Promise<void> => {
+    try {
+        const { projectPath } = req.body;
+        const basePath = projectPath || process.cwd();
+
+        const skillsDir = await skillService.initializeSkillsFolder(basePath);
+
+        res.json({
+            success: true,
+            message: `Skills folder initialized at ${skillsDir}`,
+            path: skillsDir,
+        });
+    } catch (error) {
+        logger.error('Failed to initialize skills folder', { error: (error as Error).message });
+        res.status(500).json({
+            success: false,
+            error: (error as Error).message,
+        });
+    }
+});
+
 export default router;
