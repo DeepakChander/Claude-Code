@@ -2202,6 +2202,14 @@ program
         continue;
       }
 
+      // ==================== /logout ====================
+      if (input === '/logout' || input === 'logout') {
+        config.delete('token');
+        console.log(chalk.green('\n  ✓ Logged out successfully'));
+        console.log(chalk.gray('  Credentials cleared from local configuration.\n'));
+        process.exit(0);
+      }
+
       // Handle unknown commands
       if (input.startsWith('/')) {
         console.log(chalk.yellow(`Unknown command: ${input}`));
