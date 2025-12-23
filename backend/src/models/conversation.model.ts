@@ -4,6 +4,7 @@ import { v4 as uuidv4 } from 'uuid';
 export interface IConversation extends Document {
   conversationId: string;
   userId: Types.ObjectId | string;
+  projectId: string;
   title: string;
   workspacePath: string;
   sessionId: string; // Claude Code session ID for resume functionality
@@ -29,6 +30,11 @@ const conversationSchema = new Schema<IConversation>(
     },
     userId: {
       type: Schema.Types.Mixed, // Can be ObjectId or string UUID
+      required: true,
+      index: true,
+    },
+    projectId: {
+      type: String,
       required: true,
       index: true,
     },

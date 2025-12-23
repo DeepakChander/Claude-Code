@@ -4,6 +4,7 @@ import { AuthRequest } from '../middleware/auth.middleware';
 import { ensureWorkspace } from '../services/workspace.service';
 import * as cliService from '../services/agent-cli.service';
 import * as sdkService from '../services/agent-sdk.service';
+import { ensureUserProject } from '../services/project.service';
 import * as conversationRepo from '../repositories/conversation.repository';
 import * as messageRepo from '../repositories/message.repository';
 import logger, { logAgentQuery } from '../utils/logger';
@@ -47,11 +48,15 @@ export const runAgent = async (req: AuthRequest, res: Response): Promise<void> =
   }
 
   try {
-    // Ensure workspace exists
-    const workspace = await ensureWorkspace(userId, projectId);
+    // Enforce One Project Per User
+    const project = await ensureUserProject(userId);
+    const effectiveProjectId = project.projectId;
+
+    // Ensure workspace exists (using project ID as name)
+    const workspace = await ensureWorkspace(userId, effectiveProjectId);
 
     // Find or create conversation
-    const conversation = await conversationRepo.findOrCreateByProject(userId, projectId, model);
+    const conversation = await conversationRepo.findOrCreateByProject(userId, effectiveProjectId, model);
 
     // Log the query
     logAgentQuery(conversation.conversationId, prompt, userId);
