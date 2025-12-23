@@ -99,6 +99,71 @@ const apiRequest = async (
   return response;
 };
 
+// Tools that require user approval before execution
+const TOOLS_REQUIRING_APPROVAL = ['Write', 'Edit', 'Bash'];
+
+/**
+ * Ask user for approval before executing a tool
+ * Shows preview of the action and waits for confirmation
+ */
+async function askToolApproval(
+  toolName: string,
+  toolInput: Record<string, unknown>
+): Promise<{ approved: boolean; reason?: string }> {
+  console.log(''); // Empty line for spacing
+
+  // Show what the tool will do
+  if (toolName === 'Write') {
+    const filePath = toolInput.file_path as string;
+    const content = toolInput.content as string;
+    const contentPreview = content.length > 500 ? content.substring(0, 500) + '\n... (truncated)' : content;
+
+    console.log(chalk.cyan('┌─────────────────────────────────────────────────────────────┐'));
+    console.log(chalk.cyan('│ ') + chalk.yellow('AI wants to CREATE/OVERWRITE file:') + chalk.cyan('                         │'));
+    console.log(chalk.cyan('│ ') + chalk.white(`📄 ${filePath}`));
+    console.log(chalk.cyan('├─────────────────────────────────────────────────────────────┤'));
+    console.log(chalk.gray(contentPreview.split('\n').map(l => `│ ${l}`).join('\n')));
+    console.log(chalk.cyan('└─────────────────────────────────────────────────────────────┘'));
+
+  } else if (toolName === 'Edit') {
+    const filePath = toolInput.file_path as string;
+    const oldString = (toolInput.old_string as string || '').substring(0, 100);
+    const newString = (toolInput.new_string as string || '').substring(0, 100);
+
+    console.log(chalk.cyan('┌─────────────────────────────────────────────────────────────┐'));
+    console.log(chalk.cyan('│ ') + chalk.yellow('AI wants to EDIT file:') + chalk.cyan('                                     │'));
+    console.log(chalk.cyan('│ ') + chalk.white(`📝 ${filePath}`));
+    console.log(chalk.cyan('├─────────────────────────────────────────────────────────────┤'));
+    console.log(chalk.red(`│ - ${oldString}...`));
+    console.log(chalk.green(`│ + ${newString}...`));
+    console.log(chalk.cyan('└─────────────────────────────────────────────────────────────┘'));
+
+  } else if (toolName === 'Bash') {
+    const command = toolInput.command as string;
+
+    console.log(chalk.cyan('┌─────────────────────────────────────────────────────────────┐'));
+    console.log(chalk.cyan('│ ') + chalk.yellow('AI wants to RUN COMMAND:') + chalk.cyan('                                   │'));
+    console.log(chalk.cyan('│ ') + chalk.white(`💻 ${command}`));
+    console.log(chalk.cyan('└─────────────────────────────────────────────────────────────┘'));
+  }
+
+  // Ask for approval
+  const { approved } = await inquirer.prompt([
+    {
+      type: 'confirm',
+      name: 'approved',
+      message: chalk.cyan('Approve this action?'),
+      default: true,
+    },
+  ]);
+
+  if (!approved) {
+    console.log(chalk.yellow('  ⊘ Action skipped by user'));
+  }
+
+  return { approved };
+}
+
 // Process SSE stream
 const processStream = async (
   response: FetchResponse,
@@ -701,6 +766,20 @@ async function continueWithToolResults(
       const newToolResults: Array<{ tool_use_id: string; output: string; is_error: boolean }> = [];
 
       for (const tool of pendingTools) {
+        // Check if this tool requires user approval
+        if (TOOLS_REQUIRING_APPROVAL.includes(tool.name)) {
+          const { approved } = await askToolApproval(tool.name, tool.input);
+
+          if (!approved) {
+            newToolResults.push({
+              tool_use_id: tool.id,
+              output: 'User rejected this action',
+              is_error: true,
+            });
+            continue;
+          }
+        }
+
         console.log(chalk.gray(`  Executing ${tool.name}...`));
         const result = await executeToolLocally(tool.name, tool.input, workingDir);
 
@@ -1907,6 +1986,20 @@ program
               const toolResults: Array<{ tool_use_id: string; output: string; is_error: boolean }> = [];
 
               for (const tool of pendingTools) {
+                // Check if this tool requires user approval
+                if (TOOLS_REQUIRING_APPROVAL.includes(tool.name)) {
+                  const { approved } = await askToolApproval(tool.name, tool.input);
+
+                  if (!approved) {
+                    toolResults.push({
+                      tool_use_id: tool.id,
+                      output: 'User rejected this action',
+                      is_error: true,
+                    });
+                    continue;
+                  }
+                }
+
                 console.log(chalk.gray(`  Executing ${tool.name}...`));
                 const result = await executeToolLocally(tool.name, tool.input, workingDir);
 
