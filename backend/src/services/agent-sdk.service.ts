@@ -387,7 +387,7 @@ export const runSdkStreaming = async (
     // Calculate cost
     const pricing = getModelPricing(model);
     const costUsd = (totalTokensInput / 1_000_000) * pricing.input +
-                    (totalTokensOutput / 1_000_000) * pricing.output;
+      (totalTokensOutput / 1_000_000) * pricing.output;
 
     // Send completion message
     res.write(`data: ${JSON.stringify({
@@ -547,7 +547,7 @@ export const runSdkSync = async (
     // Calculate cost
     const pricing = getModelPricing(model);
     const costUsd = (totalTokensInput / 1_000_000) * pricing.input +
-                    (totalTokensOutput / 1_000_000) * pricing.output;
+      (totalTokensOutput / 1_000_000) * pricing.output;
 
     logger.info('Claude API sync with tools completed', {
       sessionId,
@@ -923,7 +923,7 @@ export const runChatStreaming = async (
     // Calculate cost
     const pricing = getModelPricing(model);
     const costUsd = (totalTokensInput / 1_000_000) * pricing.input +
-                    (totalTokensOutput / 1_000_000) * pricing.output;
+      (totalTokensOutput / 1_000_000) * pricing.output;
 
     // Send usage info
     res.write(`data: ${JSON.stringify({
@@ -1302,7 +1302,7 @@ export const submitToolResults = async (
     // Calculate cost
     const pricing = getModelPricing(model);
     const costUsd = (totalTokensInput / 1_000_000) * pricing.input +
-                    (totalTokensOutput / 1_000_000) * pricing.output;
+      (totalTokensOutput / 1_000_000) * pricing.output;
 
     // Send usage info
     res.write(`data: ${JSON.stringify({
@@ -1344,6 +1344,312 @@ export const submitToolResults = async (
   }
 };
 
+/**
+ * WebSocket Chat Streaming - Stream AI responses via WebSocket
+ * Similar to runChatStreaming but uses WebSocket instead of SSE
+ */
+export const runChatStreamingForWebSocket = async (
+  prompt: string,
+  sessionId: string,
+  projectId: string,
+  ws: import('ws').WebSocket,
+  _userId: string, // Prefixed with underscore since unused for now
+  onApprovalNeeded?: (toolCallId: string, toolName: string, toolInput: Record<string, unknown>) => void
+): Promise<void> => {
+  const workspacePath = process.cwd(); // Default to current directory
+  let totalTokensInput = 0;
+  let totalTokensOutput = 0;
+
+  try {
+    const model = openRouterConfig.defaultModel;
+    const maxTokens = 8192;
+    const useReasoning = supportsReasoning(model);
+
+    logger.info('Running WebSocket streaming chat', {
+      sessionId,
+      projectId,
+      model,
+      useReasoning,
+    });
+
+    // Get or create conversation history
+    let messages: OpenAIMessage[] = [];
+    if (conversationHistory.has(sessionId)) {
+      messages = [...conversationHistory.get(sessionId)!];
+    }
+
+    // Add new user message
+    messages.push({ role: 'user', content: prompt });
+
+    // Send init message
+    ws.send(JSON.stringify({
+      type: 'system',
+      subtype: 'init',
+      sessionId,
+      timestamp: new Date().toISOString(),
+      data: {
+        mode: 'streaming',
+        model,
+        useReasoning,
+      }
+    }));
+
+    const systemPrompt = buildSystemPrompt(workspacePath);
+
+    // Build request body
+    const requestBody: Record<string, unknown> = {
+      model,
+      messages: [
+        { role: 'system', content: systemPrompt },
+        ...messages,
+      ],
+      max_tokens: maxTokens,
+      stream: true,
+      tools: getOpenAITools(),
+    };
+
+    // Make streaming request to OpenRouter
+    const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${openRouterConfig.authToken}`,
+        'Content-Type': 'application/json',
+        'HTTP-Referer': 'https://openanalyst.ai',
+        'X-Title': 'OpenAnalyst',
+      },
+      body: JSON.stringify(requestBody),
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`OpenRouter API error: ${response.status} - ${errorText}`);
+    }
+
+    const reader = response.body?.getReader();
+    if (!reader) {
+      throw new Error('No response body reader');
+    }
+
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let fullContent = '';
+    let currentToolCalls: Array<{ id: string; type: string; function: { name: string; arguments: string } }> = [];
+
+    // Stream response
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        const data = line.slice(6);
+
+        if (data === '[DONE]') {
+          // Stream complete
+          ws.send(JSON.stringify({
+            type: 'complete',
+            sessionId,
+            timestamp: new Date().toISOString(),
+            data: {
+              tokensInput: totalTokensInput,
+              tokensOutput: totalTokensOutput,
+            }
+          }));
+          break;
+        }
+
+        try {
+          const parsed = JSON.parse(data);
+          const delta = parsed.choices?.[0]?.delta;
+
+          if (delta?.content) {
+            fullContent += delta.content;
+
+            // Send text chunk
+            ws.send(JSON.stringify({
+              type: 'text',
+              sessionId,
+              timestamp: new Date().toISOString(),
+              data: {
+                content: fullContent,
+                delta: delta.content,
+              }
+            }));
+          }
+
+          // Handle tool calls
+          if (delta?.tool_calls) {
+            for (const toolCall of delta.tool_calls) {
+              const index = toolCall.index || 0;
+
+              if (!currentToolCalls[index]) {
+                currentToolCalls[index] = {
+                  id: toolCall.id || `tool-${Date.now()}-${index}`,
+                  type: 'function',
+                  function: { name: '', arguments: '' }
+                };
+              }
+
+              if (toolCall.function?.name) {
+                currentToolCalls[index].function.name = toolCall.function.name;
+              }
+              if (toolCall.function?.arguments) {
+                currentToolCalls[index].function.arguments += toolCall.function.arguments;
+              }
+            }
+          }
+
+          // Track usage
+          if (parsed.usage) {
+            totalTokensInput = parsed.usage.prompt_tokens || 0;
+            totalTokensOutput = parsed.usage.completion_tokens || 0;
+          }
+        } catch {
+          // Ignore parse errors for incomplete chunks
+        }
+      }
+    }
+
+    // Process completed tool calls
+    for (const toolCall of currentToolCalls) {
+      if (!toolCall.function.name) continue;
+
+      const toolName = toolCall.function.name;
+      let toolInput: Record<string, unknown> = {};
+
+      try {
+        toolInput = JSON.parse(toolCall.function.arguments || '{}');
+      } catch {
+        toolInput = { raw: toolCall.function.arguments };
+      }
+
+      // Check if tool needs approval
+      const needsApproval = ['Write', 'Edit', 'Bash'].includes(toolName);
+
+      if (needsApproval) {
+        // Send approval_needed event
+        ws.send(JSON.stringify({
+          type: 'approval_needed',
+          sessionId,
+          timestamp: new Date().toISOString(),
+          data: {
+            toolCallId: toolCall.id,
+            toolName,
+            toolInput,
+            requiresApproval: true,
+            preview: toolName === 'Write' ? {
+              filePath: toolInput.file_path,
+              content: toolInput.content,
+            } : toolName === 'Bash' ? {
+              command: toolInput.command,
+            } : null,
+          }
+        }));
+
+        // Notify the caller to store pending approval
+        if (onApprovalNeeded) {
+          onApprovalNeeded(toolCall.id, toolName, toolInput);
+        }
+      } else {
+        // Auto-execute safe tools (Read, ListDir, Glob, Grep, TodoWrite)
+        ws.send(JSON.stringify({
+          type: 'tool_use',
+          sessionId,
+          timestamp: new Date().toISOString(),
+          data: {
+            toolCallId: toolCall.id,
+            toolName,
+            toolInput,
+            autoExecute: true,
+          }
+        }));
+
+        // Execute the tool
+        try {
+          const result = await executeTool(toolName, toolInput, workspacePath);
+
+          // For TodoWrite, send todo_created event
+          if (toolName === 'TodoWrite' && toolInput.todos) {
+            ws.send(JSON.stringify({
+              type: 'todo_created',
+              sessionId,
+              timestamp: new Date().toISOString(),
+              data: {
+                todos: (toolInput.todos as Array<{ content: string; status?: string }>).map((t, i) => ({
+                  id: `todo-${i}`,
+                  content: t.content,
+                  status: t.status || 'pending',
+                }))
+              }
+            }));
+          }
+
+          ws.send(JSON.stringify({
+            type: 'tool_result',
+            sessionId,
+            timestamp: new Date().toISOString(),
+            data: {
+              toolCallId: toolCall.id,
+              toolName,
+              success: result.success,
+              output: result.output,
+              error: result.error,
+            }
+          }));
+        } catch (error) {
+          ws.send(JSON.stringify({
+            type: 'tool_result',
+            sessionId,
+            timestamp: new Date().toISOString(),
+            data: {
+              toolCallId: toolCall.id,
+              toolName,
+              success: false,
+              output: '',
+              error: (error as Error).message,
+            }
+          }));
+        }
+      }
+    }
+
+    // Store conversation history
+    messages.push({
+      role: 'assistant',
+      content: fullContent || null,
+      tool_calls: currentToolCalls.length > 0 ? currentToolCalls as OpenAIToolCall[] : undefined,
+    });
+    conversationHistory.set(sessionId, messages);
+
+    logger.info('WebSocket streaming completed', {
+      sessionId,
+      contentLength: fullContent.length,
+      toolCalls: currentToolCalls.length,
+      tokensInput: totalTokensInput,
+      tokensOutput: totalTokensOutput,
+    });
+
+  } catch (error) {
+    logger.error('WebSocket streaming error', {
+      sessionId,
+      error: (error as Error).message,
+    });
+
+    ws.send(JSON.stringify({
+      type: 'error',
+      sessionId,
+      timestamp: new Date().toISOString(),
+      data: {
+        message: (error as Error).message,
+      }
+    }));
+  }
+};
+
 export default {
   runSdkStreaming,
   runSdkSync,
@@ -1352,4 +1658,5 @@ export default {
   getSessionHistory,
   runChatStreaming,
   submitToolResults,
+  runChatStreamingForWebSocket,
 };

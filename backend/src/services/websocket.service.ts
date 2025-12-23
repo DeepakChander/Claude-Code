@@ -250,10 +250,20 @@ class WebSocketService {
     return `ws-client-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
   }
 
+  // Pending approvals storage
+  private pendingApprovals: Map<string, {
+    toolCallId: string;
+    toolName: string;
+    toolInput: Record<string, unknown>;
+    sessionId: string;
+    clientId: string;
+    timestamp: Date;
+  }> = new Map();
+
   /**
    * Handle incoming messages from clients
    */
-  private handleMessage(clientId: string, data: Buffer | ArrayBuffer | Buffer[]): void {
+  private async handleMessage(clientId: string, data: Buffer | ArrayBuffer | Buffer[]): Promise<void> {
     try {
       const message = JSON.parse(data.toString());
       const client = this.clients.get(clientId);
@@ -261,6 +271,131 @@ class WebSocketService {
       if (!client) return;
 
       switch (message.type) {
+        case 'authenticate':
+          // Authenticate client with JWT token
+          if (message.payload?.token) {
+            // TODO: Verify JWT token here
+            client.userId = 'authenticated-user';
+            logger.info('Client authenticated', { clientId });
+
+            client.ws.send(JSON.stringify({
+              type: 'authenticated',
+              timestamp: new Date().toISOString(),
+              data: { success: true }
+            }));
+          }
+          break;
+
+        case 'chat':
+          // Handle chat message - stream AI response
+          const { prompt, sessionId, projectId } = message.payload || {};
+
+          if (!prompt || !sessionId) {
+            client.ws.send(JSON.stringify({
+              type: 'error',
+              timestamp: new Date().toISOString(),
+              data: { message: 'Missing prompt or sessionId' }
+            }));
+            return;
+          }
+
+          // Subscribe client to this session
+          client.sessionId = sessionId;
+
+          logger.info('Chat message received', { clientId, sessionId, promptLength: prompt.length });
+
+          // Send thinking indicator
+          client.ws.send(JSON.stringify({
+            type: 'thinking',
+            sessionId,
+            timestamp: new Date().toISOString(),
+            data: { content: 'Analyzing your request...' }
+          }));
+
+          // Call AI and stream response
+          try {
+            await this.streamAIResponse(client, sessionId, projectId || 'default', prompt);
+          } catch (error) {
+            client.ws.send(JSON.stringify({
+              type: 'error',
+              sessionId,
+              timestamp: new Date().toISOString(),
+              data: { message: (error as Error).message }
+            }));
+          }
+          break;
+
+        case 'approve':
+          // User approved a tool execution
+          const approveToolCallId = message.payload?.toolCallId;
+          const pending = this.pendingApprovals.get(approveToolCallId);
+
+          if (!pending) {
+            client.ws.send(JSON.stringify({
+              type: 'error',
+              timestamp: new Date().toISOString(),
+              data: { message: 'No pending approval found for this toolCallId' }
+            }));
+            return;
+          }
+
+          logger.info('Tool approved', { toolCallId: approveToolCallId, toolName: pending.toolName });
+
+          // Send approval confirmation
+          client.ws.send(JSON.stringify({
+            type: 'tool_approved',
+            sessionId: pending.sessionId,
+            timestamp: new Date().toISOString(),
+            data: {
+              toolCallId: approveToolCallId,
+              toolName: pending.toolName,
+              status: 'executing'
+            }
+          }));
+
+          // Execute the tool (will be done by agent-sdk service)
+          // For now, send a result placeholder
+          client.ws.send(JSON.stringify({
+            type: 'tool_result',
+            sessionId: pending.sessionId,
+            timestamp: new Date().toISOString(),
+            data: {
+              toolCallId: approveToolCallId,
+              toolName: pending.toolName,
+              success: true,
+              output: `Tool ${pending.toolName} executed successfully`
+            }
+          }));
+
+          this.pendingApprovals.delete(approveToolCallId);
+          break;
+
+        case 'reject':
+          // User rejected a tool execution
+          const rejectToolCallId = message.payload?.toolCallId;
+          const reason = message.payload?.reason || 'User rejected';
+          const rejectedPending = this.pendingApprovals.get(rejectToolCallId);
+
+          if (rejectedPending) {
+            logger.info('Tool rejected', { toolCallId: rejectToolCallId, reason });
+
+            client.ws.send(JSON.stringify({
+              type: 'tool_result',
+              sessionId: rejectedPending.sessionId,
+              timestamp: new Date().toISOString(),
+              data: {
+                toolCallId: rejectToolCallId,
+                toolName: rejectedPending.toolName,
+                success: false,
+                output: '',
+                error: reason
+              }
+            }));
+
+            this.pendingApprovals.delete(rejectToolCallId);
+          }
+          break;
+
         case 'subscribe':
           // Subscribe client to a specific session
           if (message.sessionId) {
@@ -317,6 +452,62 @@ class WebSocketService {
         error: (error as Error).message,
       });
     }
+  }
+
+  /**
+   * Stream AI response to client via WebSocket
+   */
+  private async streamAIResponse(
+    client: WebSocketClient,
+    sessionId: string,
+    projectId: string,
+    prompt: string
+  ): Promise<void> {
+    // Import agent service dynamically to avoid circular dependency
+    const { runChatStreamingForWebSocket } = await import('./agent-sdk.service');
+
+    await runChatStreamingForWebSocket(
+      prompt,
+      sessionId,
+      projectId,
+      client.ws,
+      client.userId,
+      (toolCallId: string, toolName: string, toolInput: Record<string, unknown>) => {
+        // Store pending approval
+        const clientId = Array.from(this.clients.entries())
+          .find(([, c]) => c.ws === client.ws)?.[0] || 'unknown';
+
+        this.pendingApprovals.set(toolCallId, {
+          toolCallId,
+          toolName,
+          toolInput,
+          sessionId,
+          clientId,
+          timestamp: new Date()
+        });
+      }
+    );
+  }
+
+  /**
+   * Get pending approval by ID
+   */
+  getPendingApproval(toolCallId: string) {
+    return this.pendingApprovals.get(toolCallId);
+  }
+
+  /**
+   * Clear expired pending approvals (older than 5 minutes)
+   */
+  clearExpiredApprovals(): void {
+    const fiveMinutesAgo = new Date(Date.now() - 5 * 60 * 1000);
+
+    this.pendingApprovals.forEach((approval, toolCallId) => {
+      if (approval.timestamp < fiveMinutesAgo) {
+        this.pendingApprovals.delete(toolCallId);
+        logger.info('Expired pending approval cleared', { toolCallId });
+      }
+    });
   }
 
   // TODO: Connect to frontend WebSocket URL when provided

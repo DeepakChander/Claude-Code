@@ -170,6 +170,44 @@ export async function executeToolLocally(
         return { success: true, output: output || '(empty directory)' };
       }
 
+      case 'TodoWrite': {
+        const todos = toolInput.todos as Array<{
+          content: string;
+          activeForm: string;
+          status: 'pending' | 'in_progress' | 'completed';
+        }>;
+
+        if (!todos || !Array.isArray(todos)) {
+          return { success: false, output: '', error: 'Invalid todos format' };
+        }
+
+        // Display checkbox-style progress
+        console.log('\n\x1b[36m📋 Progress Updates:\x1b[0m');
+        todos.forEach((todo, index) => {
+          let statusIcon: string;
+          let textStyle: string;
+
+          switch (todo.status) {
+            case 'completed':
+              statusIcon = '\x1b[32m✓\x1b[0m'; // Green checkmark
+              textStyle = '\x1b[90m'; // Gray text (completed)
+              break;
+            case 'in_progress':
+              statusIcon = '\x1b[33m⟳\x1b[0m'; // Yellow spinner
+              textStyle = '\x1b[37m'; // White text (active)
+              break;
+            default:
+              statusIcon = '\x1b[90m○\x1b[0m'; // Gray circle
+              textStyle = '\x1b[90m'; // Gray text (pending)
+          }
+
+          console.log(`  ${statusIcon} ${textStyle}${index + 1}. ${todo.content}\x1b[0m`);
+        });
+        console.log('');
+
+        return { success: true, output: `Created ${todos.length} todo items` };
+      }
+
       default:
         return { success: false, output: '', error: `Unknown tool: ${toolName}` };
     }
@@ -198,6 +236,8 @@ export function getToolDescription(toolName: string, toolInput: Record<string, u
       return `Searching for: ${toolInput.pattern}`;
     case 'ListDir':
       return `Listing: ${toolInput.path || '.'}`;
+    case 'TodoWrite':
+      return `Creating todo list: ${(toolInput.todos as unknown[])?.length || 0} items`;
     default:
       return `${toolName}`;
   }
