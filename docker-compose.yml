@@ -44,7 +44,7 @@ services:
   brain:
     build: ./services/brain
     ports:
-      - "3456:3456"
+      - "443:3456"
     environment:
       - PORT=3456
       - MONGODB_URI=${MONGODB_URI}
@@ -55,12 +55,19 @@ services:
       - ANTHROPIC_BASE_URL=${ANTHROPIC_BASE_URL}
       - ANTHROPIC_AUTH_TOKEN=${ANTHROPIC_AUTH_TOKEN}
       - ANTHROPIC_MODEL=${ANTHROPIC_MODEL}
+      - AGNO_URL=http://agno:8001
+      - WINDMILL_URL=http://windmill_server:8000
     networks:
       - openanalyst-net
     volumes:
       - ./services/brain/logs:/app/logs
       - ./services/brain/certs:/app/certs
     restart: always
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:3456/health" ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
     depends_on:
       - redis
 
@@ -76,9 +83,15 @@ services:
       - JWT_SECRET=${JWT_SECRET}
       - REDIS_URL=redis://redis:6379
       - BRAIN_SERVICE_URL=http://brain:3456
+      - AGNO_URL=http://agno:8001
     networks:
       - openanalyst-net
     restart: always
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:8002/health" ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
     depends_on:
       - redis
       - brain
@@ -100,6 +113,11 @@ services:
     networks:
       - openanalyst-net
     restart: always
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:8001/health" ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
     depends_on:
       - redis
       - brain
