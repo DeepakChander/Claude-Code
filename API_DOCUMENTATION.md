@@ -154,3 +154,50 @@ Connect to this WebSocket to receive global updates, such as background task pro
 2.  [ ] **Auth**: Get JWT and store it.
 3.  [ ] **Chat UI**: POST to `/api/agent/run` and render the SSE stream.
 4.  [ ] **Tooling**: Implement a handler for `tool_use` events that performs filesystem operations and posts results back.
+
+---
+
+## ❓ Troubleshooting: `net::ERR_CERT_AUTHORITY_INVALID`
+
+If you see this error, your client is blocking the Self-Signed Certificate. Here is how to fix it in code:
+
+### Option A: Electron (If building a Desktop IDE)
+In your **Main Process** (`main.js` or `main.ts`), add this before the app is ready:
+```javascript
+import { app } from 'electron';
+
+// ⚠️ SECURITY: Only use in development!
+app.commandLine.appendSwitch('ignore-certificate-errors');
+
+app.on('certificate-error', (event, webContents, url, error, certificate, callback) => {
+  if (url.startsWith('https://16.171.8.128')) {
+    // Verification logic.
+    event.preventDefault();
+    callback(true); // Trust this specific cert
+  } else {
+    callback(false);
+  }
+});
+```
+
+### Option B: Node.js (Axios/Fetch)
+Pass a custom agent that ignores SSL errors.
+```typescript
+import https from 'https';
+import axios from 'axios';
+
+const httpsAgent = new https.Agent({
+  rejectUnauthorized: false // <--- THE FIX
+});
+
+const response = await axios.get('https://16.171.8.128:3456/health', { httpsAgent });
+```
+
+### Option C: Browser (Chrome/Edge)
+You cannot "fix" this in code running in a normal browser tab (security restriction).
+**Workaround**:
+1. Open a new tab.
+2. Visit `https://16.171.8.128:3456/health`
+3. Click **Advanced** -> **Proceed to 16.171.8.128 (unsafe)**.
+4. Reload your app.
+
