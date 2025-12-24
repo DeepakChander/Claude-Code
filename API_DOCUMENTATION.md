@@ -1,421 +1,116 @@
-# OpenAnalyst API Documentation
+# 🔌 OpenAnalyst API: IDE Integration Guide
 
-> **Version**: 2.0  
-> **Base URL**: `http://16.171.8.128:3456`  
-> **WebSocket**: `ws://16.171.8.128:3456/ws`
+This guide details how to integrate the OpenAnalyst backend into an IDE (VS Code, JetBrains, etc.).
 
----
+## 🌐 Endpoints Overview
 
-## Table of Contents
+| Service | Protocol | URL Pattern | Description |
+| :--- | :--- | :--- | :--- |
+| **API Base** | HTTPS | `https://16.171.8.128:3456` | Core REST API for Auth and Agent Control |
+| **Real-time** | WSS | `wss://16.171.8.128:3456/ws` | Live event stream (Thinking, Output, User Input Requests) |
 
-1. [Authentication](#1-authentication)
-2. [HTTP Endpoints](#2-http-endpoints)
-3. [WebSocket API](#3-websocket-api)
-4. [Data Types](#4-data-types)
-5. [Error Handling](#5-error-handling)
-6. [Examples](#6-examples)
+> **⚠️ Security Note**: The server uses a Self-Signed Certificate. You must configure your IDE's HTTP client to **ignore SSL verification errors** (e.g., `insecure: true`, `rejectUnauthorized: false`) or add the certificate to your trust store.
 
 ---
 
-## 1. Authentication
+## 🔐 1. Authentication
+All requests require a JWT Token.
 
-### Get JWT Token
-
-```http
-POST /api/auth/token
-Content-Type: application/json
-```
-
-**Request Body:**
+### Generate Token
+**POST** `/api/auth/token`
 ```json
 {
-  "userId": "user-123"
+  "userId": "user-123",  // Unique ID for your IDE user
+  "apiKey": "your-master-api-key"
 }
 ```
-
-**Response:**
+**Response**:
 ```json
 {
   "success": true,
   "data": {
-    "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
-    "expiresIn": "7d",
-    "expiresAt": "2025-12-30T12:00:00.000Z",
-    "userId": "user-123"
+    "token": "eyJhbG...",
+    "expiresIn": "7d"
   }
 }
 ```
-
-### Using the Token
-
-Include the token in all API requests:
-```http
-Authorization: Bearer YOUR_JWT_TOKEN
-```
+> **Action**: Store this `token`. Add it to the header of **ALL** subsequent HTTP and WebSocket requests: `Authorization: Bearer <TOKEN>`
 
 ---
 
-## 2. HTTP Endpoints
+## 🚀 2. Start Agent Loop (The "Single Endpoint")
+This is the main entry point to start a task. The backend handles the complexity; you just stream the response.
 
-### 2.1 Health Check
+**POST** `/api/agent/run`
+**Headers**: `Authorization: Bearer <TOKEN>`, `Accept: text/event-stream`
 
-```http
-GET /health
-```
-
-**Response:**
+**Body**:
 ```json
 {
-  "status": "healthy",
-  "timestamp": "2025-12-23T12:00:00.000Z"
+  "prompt": "Create a new React component called Header",
+  "projectId": "my-project-root", // Use the open folder path or ID
+  "allowedTools": ["Read", "Write", "Bash", "Glob"], // Optional constraints
+  "model": "claude-3-5-sonnet-20241022"
 }
 ```
 
+### Handling the Response (Server-Sent Events)
+The server streams events as they happen. You need to listen for these event types:
+
+| Event Type | Data Payload | IDE Action |
+| :--- | :--- | :--- |
+| `thinking` | `{ "content": "Analyzing request..." }` | Show a spinner or "Thinking..." status. |
+| `text` | `{ "content": "I will create the file..." }` | Display text in the chat window (markdown supported). |
+| **`tool_use`** | `{ "tool": "Write", "input": { ... }, "id": "call_123" }` | **CRITICAL**: The Agent wants to run a tool (e.g., save a file). See Section 3. |
+| `user_input` | `{ "prompt": "Please confirm..." }` | Show an input box to the user to get feedback. |
+| `error` | `{ "message": "Failed to..." }` | Show error toast. |
+| `stop` | `{}` | Task complete. Hide spinner. |
+
 ---
 
-### 2.2 Chat (SSE Streaming)
+## 🛠️ 3. Handling Tool Execution (Client-Side)
+When the backend sends a `tool_use` event, **IT IS PAUSED**. It waits for YOU (the IDE) to execute the tool and send back the result.
 
-```http
-POST /api/agent/sdk/chat
-Authorization: Bearer YOUR_JWT_TOKEN
-Content-Type: application/json
-```
+**Example Flow**:
+1.  **Backend** sends: `event: tool_use`, `data: { "tool": "Write", "input": { "file_path": "Header.tsx", "content": "..." }, "id": "call_99" }`
+2.  **IDE** (You):
+    *   Parse the input.
+    *   Write the file to the local disk.
+    *   Capture result (Success or Error).
+3.  **IDE**: **POST** `/api/agent/sdk/chat/tools` to report back.
 
-**Request Body:**
+### Submit Tool Result
+**POST** `/api/agent/sdk/chat/tools`
+**Headers**: `Authorization: Bearer <TOKEN>`
+
+**Body**:
 ```json
 {
-  "prompt": "Create a hello.txt file with Hello World",
-  "projectId": "default",
-  "sessionId": "session-123",
-  "model": "anthropic/claude-sonnet-4",
-  "stream": true
+  "toolCallId": "call_99", // Must match the ID received
+  "result": "Successfully wrote file" // Or error message
 }
 ```
-
-**Response:** Server-Sent Events stream
-
-```
-data: {"type":"system","subtype":"init","session_id":"session-123","mode":"streaming"}
-data: {"type":"text","content":"I'll create..."}
-data: {"type":"tool_use","tool":"Write","input":{...}}
-data: {"type":"complete"}
-```
+*The Agent will automatically resume after receiving this confirmation.*
 
 ---
 
-### 2.3 Submit Tool Results
+## 📡 4. Real-time Status (WebSocket)
+**URL**: `wss://16.171.8.128:3456/ws`
+**Headers**: `Authorization: Bearer <TOKEN>`
 
-```http
-POST /api/agent/sdk/tools
-Authorization: Bearer YOUR_JWT_TOKEN
-Content-Type: application/json
-```
+Connect to this WebSocket to receive global updates, such as background task progress or cross-device notifications. It mirrors the SSE stream but is bi-directional if you need to send async interrupts.
 
-**Request Body:**
-```json
-{
-  "sessionId": "session-123",
-  "toolResults": [
-    {
-      "tool_use_id": "tool-abc-123",
-      "output": "File created successfully",
-      "is_error": false
-    }
-  ]
-}
-```
+### Messages
+*   **Client -> Server**:
+    *   `{ "type": "ping" }` (Keep-alive)
+*   **Server -> Client**:
+    *   `{ "type": "connection", "status": "connected" }`
+    *   `{ "type": "progress", "message": "Installing dependencies...", "percent": 50 }`
 
 ---
 
-### 2.4 List Sessions
-
-```http
-GET /api/agent/sessions
-Authorization: Bearer YOUR_JWT_TOKEN
-```
-
-**Response:**
-```json
-{
-  "success": true,
-  "data": {
-    "sessions": [
-      {
-        "id": "session-123",
-        "title": "Create Node.js API",
-        "createdAt": "2025-12-23T12:00:00.000Z",
-        "messageCount": 5
-      }
-    ]
-  }
-}
-```
-
----
-
-## 3. WebSocket API
-
-### 3.1 Connection
-
-```javascript
-const ws = new WebSocket('ws://16.171.8.128:3456/ws');
-```
-
-### 3.2 Client → Server Messages
-
-| Message Type | Description | Payload |
-|--------------|-------------|---------|
-| `authenticate` | Auth with JWT | `{ token: "JWT" }` |
-| `chat` | Send chat message | `{ prompt, sessionId, projectId }` |
-| `approve` | Approve tool execution | `{ toolCallId }` |
-| `reject` | Reject tool execution | `{ toolCallId, reason? }` |
-| `subscribe` | Subscribe to session | `{ sessionId }` |
-| `ping` | Keep connection alive | `{}` |
-
-#### Chat Message Example
-```json
-{
-  "type": "chat",
-  "payload": {
-    "prompt": "Create a Node.js API with Express",
-    "sessionId": "session-12345",
-    "projectId": "default"
-  }
-}
-```
-
-#### Approve Message Example
-```json
-{
-  "type": "approve",
-  "payload": {
-    "toolCallId": "tool-abc-123"
-  }
-}
-```
-
----
-
-### 3.3 Server → Client Messages
-
-| Message Type | Description | Data |
-|--------------|-------------|------|
-| `connected` | Connection established | `{ clientId, message }` |
-| `authenticated` | Auth successful | `{ success: true }` |
-| `thinking` | AI is reasoning | `{ content }` |
-| `text` | Streaming text | `{ content, delta }` |
-| `todo_created` | Todo list created | `{ todos: [...] }` |
-| `task_started` | Task began | `{ todoId, content }` |
-| `task_completed` | Task finished | `{ todoId }` |
-| `tool_use` | Auto-executed tool | `{ toolName, toolInput }` |
-| `approval_needed` | Needs user approval | `{ toolCallId, toolName, preview }` |
-| `tool_result` | Tool execution result | `{ success, output, error }` |
-| `complete` | Stream finished | `{ tokensInput, tokensOutput }` |
-| `error` | Error occurred | `{ message }` |
-
-#### Approval Needed Example
-```json
-{
-  "type": "approval_needed",
-  "sessionId": "session-123",
-  "timestamp": "2025-12-23T12:00:00.000Z",
-  "data": {
-    "toolCallId": "tool-abc-123",
-    "toolName": "Write",
-    "toolInput": {
-      "file_path": "package.json",
-      "content": "{ \"name\": \"my-app\" }"
-    },
-    "requiresApproval": true,
-    "preview": {
-      "filePath": "package.json",
-      "content": "{ \"name\": \"my-app\" }"
-    }
-  }
-}
-```
-
-#### Todo Created Example
-```json
-{
-  "type": "todo_created",
-  "sessionId": "session-123",
-  "timestamp": "2025-12-23T12:00:00.000Z",
-  "data": {
-    "todos": [
-      { "id": "todo-0", "content": "Create package.json", "status": "pending" },
-      { "id": "todo-1", "content": "Create server.js", "status": "pending" }
-    ]
-  }
-}
-```
-
----
-
-## 4. Data Types
-
-### TodoItem
-```typescript
-interface TodoItem {
-  id: string;
-  content: string;
-  status: 'pending' | 'in_progress' | 'completed' | 'failed';
-}
-```
-
-### ToolPreview (for Write)
-```typescript
-interface WritePreview {
-  filePath: string;
-  content: string;
-}
-```
-
-### ToolPreview (for Bash)
-```typescript
-interface BashPreview {
-  command: string;
-}
-```
-
----
-
-## 5. Error Handling
-
-### HTTP Errors
-```json
-{
-  "success": false,
-  "error": {
-    "code": "NOT_FOUND",
-    "message": "Endpoint not found"
-  }
-}
-```
-
-### WebSocket Errors
-```json
-{
-  "type": "error",
-  "sessionId": "session-123",
-  "timestamp": "2025-12-23T12:00:00.000Z",
-  "data": {
-    "message": "Missing prompt or sessionId"
-  }
-}
-```
-
-### Common Error Codes
-| Code | Description |
-|------|-------------|
-| `UNAUTHORIZED` | Missing or invalid JWT token |
-| `NOT_FOUND` | Endpoint or resource not found |
-| `RATE_LIMITED` | Too many requests |
-| `VALIDATION_ERROR` | Invalid request body |
-| `INTERNAL_ERROR` | Server error |
-
----
-
-## 6. Examples
-
-### 6.1 Full WebSocket Chat Flow
-
-```javascript
-const ws = new WebSocket('ws://16.171.8.128:3456/ws');
-
-ws.onopen = () => {
-  // 1. Authenticate
-  ws.send(JSON.stringify({
-    type: 'authenticate',
-    payload: { token: 'YOUR_JWT_TOKEN' }
-  }));
-  
-  // 2. Send chat message
-  ws.send(JSON.stringify({
-    type: 'chat',
-    payload: {
-      prompt: 'Create a Node.js API with Express',
-      sessionId: 'session-' + Date.now(),
-      projectId: 'default'
-    }
-  }));
-};
-
-ws.onmessage = (event) => {
-  const message = JSON.parse(event.data);
-  
-  switch (message.type) {
-    case 'thinking':
-      console.log('💭 Thinking:', message.data.content);
-      break;
-      
-    case 'text':
-      console.log('📝 Text:', message.data.delta);
-      break;
-      
-    case 'todo_created':
-      console.log('📋 Todo list:', message.data.todos);
-      break;
-      
-    case 'approval_needed':
-      console.log('⚠️ Approval needed:', message.data.toolName);
-      // Auto-approve for demo
-      ws.send(JSON.stringify({
-        type: 'approve',
-        payload: { toolCallId: message.data.toolCallId }
-      }));
-      break;
-      
-    case 'tool_result':
-      console.log('✅ Result:', message.data.output);
-      break;
-      
-    case 'complete':
-      console.log('🎉 Complete!');
-      break;
-      
-    case 'error':
-      console.error('❌ Error:', message.data.message);
-      break;
-  }
-};
-```
-
-### 6.2 cURL Examples
-
-**Get Token:**
-```bash
-curl -X POST http://16.171.8.128:3456/api/auth/token \
-  -H "Content-Type: application/json" \
-  -d '{"userId":"test-user"}'
-```
-
-**Health Check:**
-```bash
-curl http://16.171.8.128:3456/health
-```
-
-**Chat (SSE):**
-```bash
-curl -X POST http://16.171.8.128:3456/api/agent/sdk/chat \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer YOUR_TOKEN" \
-  -d '{"prompt":"Hello","projectId":"default"}'
-```
-
----
-
-## Quick Reference
-
-| Purpose | URL |
-|---------|-----|
-| **Health Check** | `GET http://16.171.8.128:3456/health` |
-| **Get Token** | `POST http://16.171.8.128:3456/api/auth/token` |
-| **Chat (SSE)** | `POST http://16.171.8.128:3456/api/agent/sdk/chat` |
-| **WebSocket** | `ws://16.171.8.128:3456/ws` |
-| **Submit Tools** | `POST http://16.171.8.128:3456/api/agent/sdk/tools` |
-
----
-
-**Last Updated**: 2025-12-23  
-**Server Status**: ✅ Running on EC2
+## 📚 Summary Checklist for IDE Team
+1.  [ ] **SSL Trust**: Configure HTTP client to accept self-signed certs.
+2.  [ ] **Auth**: Get JWT and store it.
+3.  [ ] **Chat UI**: POST to `/api/agent/run` and render the SSE stream.
+4.  [ ] **Tooling**: Implement a handler for `tool_use` events that performs filesystem operations and posts results back.

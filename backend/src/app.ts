@@ -4,6 +4,9 @@ import helmet from 'helmet';
 import morgan from 'morgan';
 import compression from 'compression';
 import rateLimit from 'express-rate-limit';
+import * as http from 'http';
+import * as https from 'https';
+import * as fs from 'fs';
 import { config } from 'dotenv';
 
 import routes from './routes';
@@ -220,20 +223,42 @@ const startServer = async () => {
       logger.info('Kafka not configured - running without message queue');
     }
 
-    // Start HTTP server
-    const server = app.listen(parseInt(PORT as string, 10), HOST, () => {
-      logger.info(`OpenAnalyst API running on http://${HOST}:${PORT}`);
+    // Determine Protocol (HTTP vs HTTPS)
+    let server: http.Server | https.Server;
+    let protocol = 'http';
+
+    const sslKeyPath = process.env.SSL_KEY_PATH;
+    const sslCertPath = process.env.SSL_CERT_PATH;
+
+    if (sslKeyPath && sslCertPath && fs.existsSync(sslKeyPath) && fs.existsSync(sslCertPath)) {
+      // START HTTPS SERVER
+      const httpsOptions = {
+        key: fs.readFileSync(sslKeyPath),
+        cert: fs.readFileSync(sslCertPath),
+      };
+      server = https.createServer(httpsOptions, app);
+      protocol = 'https';
+      logger.info('Starting server in HTTPS/WSS mode');
+    } else {
+      // START HTTP SERVER
+      server = http.createServer(app);
+      logger.info('Starting server in HTTP/WS mode');
+    }
+
+    // Start Server
+    server.listen(parseInt(PORT as string, 10), HOST, () => {
+      logger.info(`OpenAnalyst API running on ${protocol}://${HOST}:${PORT}`);
       logger.info(`Environment: ${NODE_ENV}`);
-      console.log(`\nOpenAnalyst API running on http://${HOST}:${PORT}`);
+      console.log(`\nOpenAnalyst API running on ${protocol}://${HOST}:${PORT}`);
       console.log(`   Environment: ${NODE_ENV}`);
       console.log(`   Database: MongoDB`);
       console.log(`   Message Queue: ${isKafkaConfigured() ? 'Kafka' : 'Not configured'}`);
-      console.log(`   Health check: http://${HOST}:${PORT}/health`);
-      console.log(`   API docs: http://${HOST}:${PORT}/`);
-      console.log(`   WebSocket: ws://${HOST}:${PORT}/ws\n`);
+      console.log(`   Health check: ${protocol}://${HOST}:${PORT}/health`);
+      console.log(`   API docs: ${protocol}://${HOST}:${PORT}/`);
+      console.log(`   WebSocket: ${protocol === 'https' ? 'wss' : 'ws'}://${HOST}:${PORT}/ws\n`);
     });
 
-    // Initialize WebSocket server on the HTTP server
+    // Initialize WebSocket server on the HTTP/HTTPS server
     wsService.initialize(server);
     logger.info('WebSocket server initialized on /ws path');
   } catch (error) {
