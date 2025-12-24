@@ -45,6 +45,7 @@ interface WebSocketClient {
 class WebSocketService {
   private wss: WebSocketServer | null = null;
   private clients: Map<string, WebSocketClient> = new Map();
+  private connectionRateLimit: Map<string, { count: number; resetTime: number }> = new Map();
 
   // TODO: Frontend WebSocket URL - to be provided by user later
   // private frontendWsUrl: string | null = null;
@@ -67,6 +68,35 @@ class WebSocketService {
     });
 
     this.wss.on('connection', (ws, req) => {
+      // Rate limiter map (in-memory)
+      // Key: IP address, Value: { count: number, resetTime: number }
+      if (!this.connectionRateLimit) {
+        this.connectionRateLimit = new Map();
+      }
+
+      const ip = req.socket.remoteAddress || 'unknown';
+      const now = Date.now();
+      const limitWindow = 60000; // 1 minute
+      const maxAttempts = 10; // 10 attempts per minute
+
+      const record = this.connectionRateLimit.get(ip) || { count: 0, resetTime: now + limitWindow };
+
+      if (now > record.resetTime) {
+        // Reset window
+        record.count = 1;
+        record.resetTime = now + limitWindow;
+        this.connectionRateLimit.set(ip, record);
+      } else {
+        record.count++;
+        this.connectionRateLimit.set(ip, record);
+      }
+
+      if (record.count > maxAttempts) {
+        logger.warn('WebSocket connection rate limit exceeded', { ip });
+        ws.close(1008, 'Rate limit exceeded');
+        return;
+      }
+
       const clientId = this.generateClientId();
       const client: WebSocketClient = {
         ws,

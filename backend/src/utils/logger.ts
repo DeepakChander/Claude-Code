@@ -122,8 +122,11 @@ export const logError = (
   context?: string,
   meta?: Record<string, unknown>
 ) => {
+  // In production, mask stack traces for sensitive errors or just simplify
+  const isProduction = process.env.NODE_ENV === 'production';
+
   logger.error(`${context ? `[${context}] ` : ''}${error.message}`, {
-    stack: error.stack,
+    stack: isProduction ? undefined : error.stack, // Hide stack in production
     ...meta,
   });
 };
@@ -137,6 +140,8 @@ export const logAgentQuery = (
     conversationId,
     promptLength: prompt.length,
     userId,
+    // Sanitize in production: don't log full prompt if too long
+    promptPreview: prompt.length > 500 ? prompt.substring(0, 500) + '...' : prompt
   });
 };
 
