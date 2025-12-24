@@ -15,10 +15,12 @@ FROM node:20-alpine AS production
 WORKDIR /app
 
 RUN addgroup -g 1001 -S nodejs && \
-    adduser -S nodejs -u 1001
+  adduser -S nodejs -u 1001
 
 COPY package*.json ./
-RUN npm ci --omit=dev && npm cache clean --force
+# Install curl for healthcheck
+RUN apk add --no-cache curl && \
+  npm ci --omit=dev && npm cache clean --force
 
 COPY --from=builder /app/dist ./dist
 
