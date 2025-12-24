@@ -153,14 +153,17 @@ export interface ToolResult {
  * Resolve a file path, ensuring it stays within the workspace
  */
 const resolvePath = (filePath: string, workspacePath: string): string => {
-  // If absolute, use as-is but validate it's within workspace
-  if (path.isAbsolute(filePath)) {
-    const resolved = path.normalize(filePath);
-    // Allow if within workspace or is an absolute path user specified
-    return resolved;
+  const normalizedWorkspace = path.resolve(workspacePath);
+
+  // Resolve the full path
+  const resolved = path.resolve(workspacePath, filePath);
+
+  // Security Check: Ensure the resolved path starts with the workspace path
+  if (!resolved.startsWith(normalizedWorkspace)) {
+    throw new Error(`Security Error: Access denied to path outside workspace: ${filePath}`);
   }
-  // Relative path - resolve from workspace
-  return path.join(workspacePath, filePath);
+
+  return resolved;
 };
 
 /**
@@ -244,10 +247,28 @@ export async function executeTool(
         }
 
         try {
+          // SECURITY: Sanitize environment variables to prevent leaking secrets
+          // via commands like 'env' or 'printenv'
+          const sanitizedEnv = { ...process.env };
+          const sensitiveKeys = [
+            'OPENROUTER_API_KEY',
+            'JWT_SECRET',
+            'SAFE_JWT_SECRET',
+            'DATABASE_URL',
+            'AWS_ACCESS_KEY_ID',
+            'AWS_SECRET_ACCESS_KEY'
+          ];
+
+          sensitiveKeys.forEach(key => delete sanitizedEnv[key]);
+
+          // Add useful non-sensitive vars
+          sanitizedEnv.WORKSPACE_PATH = workspacePath;
+
           const { stdout, stderr } = await execAsync(command, {
             cwd: workspacePath,
-            timeout: 60000, // 60 second timeout
-            maxBuffer: 10 * 1024 * 1024, // 10MB buffer
+            env: sanitizedEnv, // explicitly pass sanitized env
+            timeout: 60000,
+            maxBuffer: 10 * 1024 * 1024,
           });
 
           const output = stdout + (stderr ? `\nSTDERR:\n${stderr}` : '');

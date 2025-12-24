@@ -166,6 +166,12 @@ MAX_WORKSPACE_SIZE_MB=500
 # ============================================
 RATE_LIMIT_WINDOW_MS=60000
 RATE_LIMIT_MAX_REQUESTS=100
+
+# ============================================
+# CORS CONFIGURATION
+# ============================================
+ALLOWED_ORIGINS=http://localhost:3000,https://openanalyst.ai
+
 ```
 
 ### Initialize Database (MongoDB)
