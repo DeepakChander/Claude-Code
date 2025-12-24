@@ -1,5 +1,5 @@
 
-import mongoose from 'mongoose';
+
 import bcrypt from 'bcrypt';
 import * as dotenv from 'dotenv';
 import { User, IUser } from '../src/models/user.model';
