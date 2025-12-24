@@ -1,144 +1,67 @@
-# =============================================
-# OpenAnalyst API - Production Docker Compose
-# =============================================
+version: '3.8'
 
 services:
-  # =============================================
-  # Apache Kafka (KRaft mode - no Zookeeper)
-  # =============================================
-  kafka:
-    image: apache/kafka:3.9.0
-    container_name: openanalyst-kafka
-    hostname: kafka
+  # 1. Message Broker for Inter-Service Communication
+  redis:
+    image: redis:alpine
     ports:
-      - "9092:9092"
+      - "6379:6379"
+    networks:
+      - openanalyst-net
+    restart: always
+
+  # 2. Windmill Server (Workflow Engine)
+  # Connects to EXTERNAL Supabase for its internal state
+  windmill_server:
+    image: ghcr.io/windmill-labs/windmill:main
+    ports:
+      - "8000:8000"
     environment:
-      KAFKA_NODE_ID: 1
-      KAFKA_PROCESS_ROLES: broker,controller
-      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
-      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
-      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
-      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
-      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
-      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
-      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
-      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
-      KAFKA_NUM_PARTITIONS: 6
-      CLUSTER_ID: 'MkU3OEVBNTcwNTJENDM2Qk'
-    volumes:
-      - kafka-data:/var/lib/kafka/data
-    healthcheck:
-      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 || exit 1"]
-      interval: 30s
-      timeout: 10s
-      retries: 5
-      start_period: 60s
-    restart: unless-stopped
+      - DATABASE_URL=${WINDMILL_DATABASE_URL}
+      - BASE_URL=http://localhost:8000
     networks:
-      - openanalyst-network
-
-  # =============================================
-  # Kafka Topic Initialization
-  # =============================================
-  kafka-init:
-    image: apache/kafka:3.9.0
-    container_name: openanalyst-kafka-init
+      - openanalyst-net
+    restart: always
     depends_on:
-      kafka:
-        condition: service_healthy
-    command: ["bash", "-c", "sleep 10 && /opt/kafka/bin/kafka-topics.sh --create --if-not-exists --bootstrap-server kafka:9092 --topic agent-requests --partitions 6 --replication-factor 1 && /opt/kafka/bin/kafka-topics.sh --create --if-not-exists --bootstrap-server kafka:9092 --topic agent-responses --partitions 6 --replication-factor 1 && echo 'Topics created!' && /opt/kafka/bin/kafka-topics.sh --list --bootstrap-server kafka:9092"]
-    networks:
-      - openanalyst-network
+      - redis
 
-  # =============================================
-  # OpenAnalyst API
-  # =============================================
-  api:
-    build:
-      context: ./backend
-      dockerfile: Dockerfile
-    container_name: openanalyst-api
+  # 3. Windmill Worker (Executes the code)
+  windmill_worker:
+    image: ghcr.io/windmill-labs/windmill:main
+    environment:
+      - DATABASE_URL=${WINDMILL_DATABASE_URL}
+      - BASE_URL=http://localhost:8000
+      - MODE=worker
+      - WORKER_GROUP=default
+      - LSP_ENABLED=true
+    networks:
+      - openanalyst-net
+    restart: always
+    depends_on:
+      - windmill_server
+
+  # 4. The Brain (Your Node.js Backend)
+  # Now running in a container, connecting to Redis + Mongo
+  brain:
+    build: ./services/brain
     ports:
       - "3456:3456"
     environment:
-      - NODE_ENV=production
       - PORT=3456
-      - HOST=0.0.0.0
-      - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
-      - KAFKA_USE_SSL=false
-      - KAFKA_REQUEST_TOPIC=agent-requests
-      - KAFKA_RESPONSE_TOPIC=agent-responses
-      - KAFKA_CONSUMER_GROUP=openanalyst-workers
-      - KAFKA_CLIENT_ID=openanalyst-api
-      - WORKSPACE_BASE_PATH=/tmp/claude-agent-workspaces
-    env_file:
-      - ./backend/.env.production
-    volumes:
-      - workspaces:/tmp/claude-agent-workspaces
-      - api-logs:/app/logs
-    depends_on:
-      kafka:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD", "node", "-e", "require('http').get('http://localhost:3456/health', (r) => process.exit(r.statusCode === 200 ? 0 : 1))"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 10s
-    restart: unless-stopped
-    networks:
-      - openanalyst-network
-
-  # =============================================
-  # Kafka Consumer Worker
-  # =============================================
-  kafka-worker:
-    build:
-      context: ./backend
-      dockerfile: Dockerfile
-    container_name: openanalyst-kafka-worker
-    command: ["node", "dist/worker.js"]
-    environment:
+      - MONGODB_URI=${MONGODB_URI}
+      - REDIS_URL=redis://redis:6379
       - NODE_ENV=production
-      - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
-      - KAFKA_USE_SSL=false
-      - KAFKA_REQUEST_TOPIC=agent-requests
-      - KAFKA_RESPONSE_TOPIC=agent-responses
-      - KAFKA_CONSUMER_GROUP=openanalyst-workers
-      - KAFKA_CLIENT_ID=openanalyst-worker
-      - WORKSPACE_BASE_PATH=/tmp/claude-agent-workspaces
-    env_file:
-      - ./backend/.env.production
-    volumes:
-      - workspaces:/tmp/claude-agent-workspaces
-      - worker-logs:/app/logs
-    depends_on:
-      kafka:
-        condition: service_healthy
-      api:
-        condition: service_healthy
-    restart: unless-stopped
+      - JWT_SECRET=${JWT_SECRET}
+      - MASTER_API_KEY=${MASTER_API_KEY}
     networks:
-      - openanalyst-network
+      - openanalyst-net
+    volumes:
+      - ./services/brain/logs:/app/logs
+      - ./services/brain/certs:/app/certs
+    restart: always
+    depends_on:
+      - redis
 
-# =============================================
-# Volumes
-# =============================================
-volumes:
-  kafka-data:
-    driver: local
-  workspaces:
-    driver: local
-  api-logs:
-    driver: local
-  worker-logs:
-    driver: local
-
-# =============================================
-# Networks
-# =============================================
 networks:
-  openanalyst-network:
+  openanalyst-net:
     driver: bridge
