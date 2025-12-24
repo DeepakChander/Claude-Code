@@ -12,27 +12,53 @@ This guide details how to integrate the OpenAnalyst backend into an IDE (VS Code
 > **✅ Security Note**: The API is secured with a **Trusted Let's Encrypt Certificate**. No special client configuration is required.
 
 
-All requests require a JWT Token.
+## 🔐 Authentication Flow (The "Chicken & Egg" Solved)
 
-### Generate Token
-**POST** `/api/auth/token`
+You cannot access the Agent (Step 2) without a Token (Step 1).
+If you try to call `/api/agent/run` directly, you will get **401 Unauthorized**.
+
+### 🛑 Step 1: One-Time Login (Get the Token)
+**Endpoint**: `POST https://api.openanalyst.com:3456/api/auth/token`
+**Access**: PUBLIC (No token needed)
+
+**Request**:
 ```json
 {
-  "userId": "user-123",  // Unique ID for your IDE user
-  "apiKey": "your-master-api-key"
+  "userId": "user-123",      // Your internal ID for the user
+  "apiKey": "master-key-1"   // The shared secret Key
 }
 ```
-**Response**:
+
+**Response** (Save this!):
 ```json
 {
   "success": true,
   "data": {
-    "token": "eyJhbG...",
+    "token": "eyJhbGciOiJIUzI1...",  // <--- THIS IS YOUR KEY 🔑
     "expiresIn": "7d"
   }
 }
 ```
-> **Action**: Store this `token`. Add it to the header of **ALL** subsequent HTTP and WebSocket requests: `Authorization: Bearer <TOKEN>`
+
+---
+
+### ✅ Step 2: Running the Agent (Use the Token)
+**Endpoint**: `POST https://api.openanalyst.com:3456/api/agent/run`
+**Access**: PROTECTED (Requires Token)
+
+**Headers**:
+You MUST attach the token from Step 1.
+```http
+Authorization: Bearer eyJhbGciOiJIUzI1...
+Content-Type: application/json
+```
+
+**Body**:
+```json
+{
+  "prompt": "Create a file..."
+}
+```
 
 ---
 
