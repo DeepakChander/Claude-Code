@@ -9,7 +9,47 @@ This guide details how to integrate the OpenAnalyst backend into an IDE (VS Code
 | **API Base** | HTTPS | `https://16.171.8.128:3456` | Core REST API for Auth and Agent Control |
 | **Real-time** | WSS | `wss://16.171.8.128:3456/ws` | Live event stream (Thinking, Output, User Input Requests) |
 
-> **⚠️ Security Note**: The server uses a Self-Signed Certificate. You must configure your IDE's HTTP client to **ignore SSL verification errors** (e.g., `insecure: true`, `rejectUnauthorized: false`) or add the certificate to your trust store.
+> **⚠️ Security Note**: The server uses a Self-Signed Certificate. You **MUST** configure your client to trust it.
+
+## 🛠️ Client Configuration (Bypass SSL Errors)
+
+### VS Code (REST Client Extension)
+If using the "REST Client" extension, add this to your VS Code `settings.json`:
+```json
+{
+  "rest-client.excludeHostsForCertificates": [
+    "16.171.8.128"
+  ]
+}
+```
+
+### JetBrains (IntelliJ / WebStorm)
+The built-in HTTP Client usually prompts to "Accept non-trusted certificate" on the first request. Click **"Accept"** in the popup.
+Alternatively, in `.idea/httpRequests/http-client.env.json`:
+```json
+{
+  "dev": {
+    "SSL_CERTIFICATE_VERIFICATION": false
+  }
+}
+```
+
+### Postman
+1.  Go to **Settings** (Gear Icon) -> **General**.
+2.  Turn **OFF** "SSL certificate verification".
+
+### Node.js (Custom Client)
+If building a custom connector in TypeScript/JavaScript:
+```typescript
+import https from 'https';
+import axios from 'axios';
+
+const agent = new https.Agent({  
+  rejectUnauthorized: false // ⚠️ ONLY for self-signed certs
+});
+
+const client = axios.create({ httpsAgent: agent });
+```
 
 ---
 
