@@ -45,7 +45,19 @@ app.use(cors({
 app.use(compression());
 
 // Request logging
-app.use(morgan('combined', {
+// Custom Morgan token for Real IP (handling proxies)
+morgan.token('real-ip', (req: Request) => {
+  const forwarded = req.headers['x-forwarded-for'];
+  if (typeof forwarded === 'string') {
+    return forwarded.split(',')[0].trim();
+  } else if (Array.isArray(forwarded)) {
+    return forwarded[0].trim();
+  }
+  return req.ip || req.socket.remoteAddress || '-';
+});
+
+// Request logging with Real IP
+app.use(morgan(':real-ip :method :url :status :res[content-length] - :response-time ms', {
   stream: {
     write: (message: string) => logger.info(message.trim()),
   },
