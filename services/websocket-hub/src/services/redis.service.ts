@@ -6,16 +6,16 @@ const REDIS_URL = process.env.REDIS_URL || 'redis://localhost:6379';
 
 // Publisher client
 const publisher = new Redis(REDIS_URL, {
-  retryDelayOnFailover: 100,
   maxRetriesPerRequest: 3,
   lazyConnect: true,
+  retryStrategy: (times) => Math.min(times * 100, 3000),
 });
 
 // Subscriber client (separate connection required for pub/sub)
 const subscriber = new Redis(REDIS_URL, {
-  retryDelayOnFailover: 100,
   maxRetriesPerRequest: 3,
   lazyConnect: true,
+  retryStrategy: (times) => Math.min(times * 100, 3000),
 });
 
 // Channels
