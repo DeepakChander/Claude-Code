@@ -18,6 +18,7 @@ import kafkaConsumer from './services/kafka-consumer.service';
 import responseHandler from './services/response-handler.service';
 import { isKafkaConfigured } from './config/kafka';
 import { wsService } from './services/websocket.service';
+import { initRedisHub, closeRedisHub } from './services/redis-hub.service';
 
 // Load environment variables
 config();
@@ -216,6 +217,19 @@ const startServer = async () => {
     await connectMongoDB();
     logger.info('MongoDB connection established');
 
+    // Initialize Redis Hub for WebSocket Hub communication
+    if (process.env.REDIS_URL) {
+      try {
+        await initRedisHub();
+        logger.info('Redis Hub initialized - listening for WebSocket Hub messages');
+      } catch (redisError) {
+        logger.warn('Redis Hub failed to start (optional)', { error: (redisError as Error).message });
+        console.warn('Redis Hub not available - WebSocket Hub integration disabled');
+      }
+    } else {
+      logger.info('Redis URL not configured - WebSocket Hub integration disabled');
+    }
+
     // Initialize Kafka services if configured
     if (isKafkaConfigured()) {
       try {
@@ -306,6 +320,10 @@ const gracefulShutdown = async (signal: string) => {
     // Shutdown WebSocket server
     wsService.shutdown();
     logger.info('WebSocket server stopped');
+
+    // Close Redis Hub connection
+    await closeRedisHub();
+    logger.info('Redis Hub connection closed');
 
     // Stop Kafka services
     if (isKafkaConfigured()) {

@@ -45,3 +45,16 @@ coverage/
 # Temporary files
 tmp/
 temp/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.venv/
+*.egg-info/
+
+# Next.js
+.next/
+out/
+next-env.d.ts

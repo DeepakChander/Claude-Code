@@ -5,6 +5,7 @@ import { ensureWorkspace } from '../services/workspace.service';
 import * as cliService from '../services/agent-cli.service';
 import * as sdkService from '../services/agent-sdk.service';
 import { ensureUserProject } from '../services/project.service';
+import { orchestrationService } from '../services/orchestration.service';
 import * as conversationRepo from '../repositories/conversation.repository';
 import * as messageRepo from '../repositories/message.repository';
 import logger, { logAgentQuery } from '../utils/logger';
@@ -1189,6 +1190,170 @@ export const submitToolResults = async (req: AuthRequest, res: Response): Promis
   }
 };
 
+/**
+ * Run orchestrated request - routes to Agno or Claude based on skill requirements
+ * POST /api/agent/orchestrate
+ */
+export const runOrchestrated = async (req: AuthRequest, res: Response): Promise<void> => {
+  const userId = req.user!.userId;
+  const { prompt, projectId = 'default', model, systemPrompt: userSystemPrompt, maxTurns } = req.body as AgentRequestBody;
+
+  // Validate request
+  const { error } = validate(agentQuerySchema, req.body);
+  if (error) {
+    res.status(400).json({
+      success: false,
+      error: { code: 'VALIDATION_ERROR', message: error },
+    });
+    return;
+  }
+
+  try {
+    // Ensure workspace exists
+    const workspace = await ensureWorkspace(userId, projectId);
+
+    // Find or create conversation
+    const conversation = await conversationRepo.findOrCreateByProject(userId, projectId, model);
+
+    // Log the query
+    logAgentQuery(conversation.conversationId, prompt, userId);
+
+    // Store user message
+    await messageRepo.createUserMessage(conversation.conversationId, prompt);
+
+    // Use orchestration service to analyze and potentially route to Agno
+    // Eval engine is enabled by default for self-correction
+    const { result, agnoResponse, evalResult } = await orchestrationService.orchestrate({
+      userId,
+      sessionId: conversation.conversationId,
+      prompt,
+      conversationId: conversation.conversationId,
+      context: { projectId },
+    });
+
+    logger.info('Orchestration completed', {
+      userId,
+      routedTo: result.routedTo,
+      skill: result.skill,
+      evalRetries: evalResult?.retryCount,
+      evalResearch: evalResult?.researchApplied,
+    });
+
+    if (result.routedTo === 'agno' && agnoResponse) {
+      // Agno handled the request (with eval engine)
+      const responseContent = agnoResponse.status === 'completed'
+        ? JSON.stringify(agnoResponse.result)
+        : agnoResponse.error || 'Task failed';
+
+      await messageRepo.createAssistantMessage(
+        conversation.conversationId,
+        responseContent
+      );
+
+      res.json({
+        success: agnoResponse.status === 'completed',
+        data: {
+          result: agnoResponse.result,
+          conversationId: conversation.conversationId,
+          routedTo: 'agno',
+          skill: result.skill,
+          taskId: agnoResponse.task_id,
+          executionTime: agnoResponse.execution_time_ms,
+          // Eval engine metadata
+          eval: evalResult ? {
+            retryCount: evalResult.retryCount,
+            researchApplied: evalResult.researchApplied,
+            needsClarification: evalResult.needsClarification,
+            questions: evalResult.questions,
+            learnings: evalResult.learnings,
+          } : undefined,
+        },
+        error: agnoResponse.status === 'failed' ? {
+          code: 'AGNO_ERROR',
+          message: agnoResponse.error,
+        } : undefined,
+      });
+    } else {
+      // Use Claude directly with skill's system prompt if matched
+      const effectiveSystemPrompt = result.systemPrompt || userSystemPrompt;
+
+      const cliResult = await cliService.runCliSync(prompt, workspace, {
+        model,
+        systemPrompt: effectiveSystemPrompt,
+        maxTurns,
+      });
+
+      // Update session ID if available
+      if (cliResult.sessionId) {
+        await conversationRepo.updateSessionId(conversation.conversationId, cliResult.sessionId);
+      }
+
+      // Parse output
+      let parsedOutput = cliResult.output;
+      try {
+        parsedOutput = JSON.parse(cliResult.output);
+      } catch {
+        // Keep as string if not valid JSON
+      }
+
+      await messageRepo.createAssistantMessage(
+        conversation.conversationId,
+        typeof parsedOutput === 'string' ? parsedOutput : JSON.stringify(parsedOutput)
+      );
+
+      res.json({
+        success: cliResult.success,
+        data: {
+          result: parsedOutput,
+          conversationId: conversation.conversationId,
+          sessionId: cliResult.sessionId,
+          routedTo: 'claude',
+          skill: result.skill,
+        },
+      });
+    }
+  } catch (error) {
+    logger.error('Orchestrated request error', { userId, projectId, error: (error as Error).message });
+
+    res.status(500).json({
+      success: false,
+      error: {
+        code: 'ORCHESTRATION_ERROR',
+        message: (error as Error).message,
+      },
+    });
+  }
+};
+
+/**
+ * Get available skills and their routing configuration
+ * GET /api/agent/skills
+ */
+export const getSkills = async (_req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const skills = orchestrationService.getAvailableSkills();
+    const agnoAvailable = await orchestrationService.isAgnoAvailable();
+
+    res.json({
+      success: true,
+      data: {
+        skills,
+        agnoAvailable,
+      },
+    });
+  } catch (error) {
+    logger.error('Get skills error', { error: (error as Error).message });
+
+    res.status(500).json({
+      success: false,
+      error: {
+        code: 'SKILLS_ERROR',
+        message: (error as Error).message,
+      },
+    });
+  }
+};
+
 export default {
   runAgent,
   runAgentSync,
@@ -1208,4 +1373,6 @@ export default {
   compactConversation,
   runAgentChat,
   submitToolResults,
+  runOrchestrated,
+  getSkills,
 };

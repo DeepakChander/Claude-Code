@@ -19,6 +19,8 @@ import {
   compactConversation,
   runAgentChat,
   submitToolResults,
+  runOrchestrated,
+  getSkills,
 } from '../controllers/agent.controller';
 
 const router = Router();
@@ -167,5 +169,23 @@ router.get('/health', agentHealth);
  * @access  Private
  */
 router.post('/compact', compactConversation);
+
+/**
+ * Orchestration endpoints
+ */
+
+/**
+ * @route   POST /api/agent/orchestrate
+ * @desc    Run orchestrated request - routes to Agno or Claude based on skill requirements
+ * @access  Private
+ */
+router.post('/orchestrate', runOrchestrated);
+
+/**
+ * @route   GET /api/agent/skills
+ * @desc    Get available skills and their routing configuration
+ * @access  Private
+ */
+router.get('/skills', getSkills);
 
 export default router;
