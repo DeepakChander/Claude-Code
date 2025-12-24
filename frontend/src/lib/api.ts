@@ -70,7 +70,7 @@ class ApiClient {
   }
 
   // Auth
-  async getToken(apiKey: string): Promise<ApiResponse<{ token: string }>> {
+  async fetchAuthToken(apiKey: string): Promise<ApiResponse<{ token: string }>> {
     return this.request('/api/auth/token', {
       method: 'POST',
       body: JSON.stringify({ apiKey }),
