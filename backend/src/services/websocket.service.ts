@@ -1,6 +1,10 @@
 import { WebSocket, WebSocketServer } from 'ws';
 import { Server } from 'http';
 import logger from '../utils/logger';
+import jwt from 'jsonwebtoken';
+import { AuthUser } from '../middleware/auth.middleware';
+import { config } from 'dotenv';
+config();
 
 /**
  * Task Progress Event Types
@@ -335,15 +339,34 @@ class WebSocketService {
         case 'authenticate':
           // Authenticate client with JWT token
           if (message.payload?.token) {
-            // TODO: Verify JWT token here
-            client.userId = 'authenticated-user';
-            logger.info('Client authenticated', { clientId });
+            try {
+              const secret = process.env.JWT_SECRET;
+              if (!secret) {
+                logger.error('JWT_SECRET is not defined');
+                client.ws.send(JSON.stringify({
+                  type: 'error',
+                  data: { message: 'Server configuration error' }
+                }));
+                return;
+              }
+              const decoded = jwt.verify(message.payload.token, secret) as AuthUser;
 
-            client.ws.send(JSON.stringify({
-              type: 'authenticated',
-              timestamp: new Date().toISOString(),
-              data: { success: true }
-            }));
+              client.userId = decoded.userId;
+              logger.info('Client authenticated', { clientId, userId: client.userId });
+
+              client.ws.send(JSON.stringify({
+                type: 'authenticated',
+                timestamp: new Date().toISOString(),
+                data: { success: true }
+              }));
+            } catch (error) {
+              logger.warn('WebSocket authentication failed', { clientId, error: (error as Error).message });
+              client.ws.send(JSON.stringify({
+                type: 'error',
+                data: { message: 'Authentication failed: Invalid token' }
+              }));
+              return;
+            }
           }
           break;
 

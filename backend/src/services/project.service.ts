@@ -6,20 +6,36 @@ import logger from '../utils/logger';
  * Ensure a project exists for the user.
  * Enforces strict "One Project Per User" rule.
  */
-export const ensureUserProject = async (userId: string): Promise<IProject> => {
+export const ensureUserProject = async (userId: string, reqProjectId?: string): Promise<IProject> => {
     try {
         // Check if project exists
-        let project = await Project.findOne({ userId });
+        let project;
 
-        if (!project) {
-            logger.info('No project found for user, creating default project', { userId });
-            // Create new default project
-            project = await Project.create({
-                projectId: uuidv4(),
-                userId,
-                name: 'Default Project',
-                description: 'Automatically created default project',
-            });
+        if (reqProjectId) {
+            project = await Project.findOne({ projectId: reqProjectId, userId });
+
+            if (!project) {
+                logger.info('Project ID provided but not found, creating new project with this ID', { userId, projectId: reqProjectId });
+                project = await Project.create({
+                    projectId: reqProjectId,
+                    userId,
+                    name: `Project ${reqProjectId.substring(0, 8)}`,
+                    description: 'Automatically created project',
+                });
+            }
+        } else {
+            // Fallback to default behavior (find any or create default)
+            project = await Project.findOne({ userId });
+
+            if (!project) {
+                logger.info('No project found for user, creating default project', { userId });
+                project = await Project.create({
+                    projectId: uuidv4(),
+                    userId,
+                    name: 'Default Project',
+                    description: 'Automatically created default project',
+                });
+            }
         }
 
         return project;

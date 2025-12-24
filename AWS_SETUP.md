@@ -24,7 +24,7 @@ ssh -i your-key.pem ubuntu@YOUR_EC2_IP
 cd ~/openanalyst-api
 chmod +x deploy.sh
 export OPENROUTER_API_KEY="sk-or-v1-YOUR_KEY"
-export DATABASE_URL="postgresql://user:pass@host:5432/db"
+export DATABASE_URL="mongodb://localhost:27017/claude-code"
 ./deploy.sh
 ```
 
@@ -148,7 +148,7 @@ HOST=0.0.0.0
 # ============================================
 # DATABASE CONFIGURATION
 # ============================================
-DATABASE_URL=postgresql://user:password@host:5432/database
+DATABASE_URL=mongodb://localhost:27017/claude-code
 
 # ============================================
 # SECURITY CONFIGURATION
@@ -168,29 +168,10 @@ RATE_LIMIT_WINDOW_MS=60000
 RATE_LIMIT_MAX_REQUESTS=100
 ```
 
-### Initialize Database
+### Initialize Database (MongoDB)
 
-```bash
-# Run the SQL initialization
-psql $DATABASE_URL -f ../database/init.sql
-```
+MongoDB initializes databases and collections automatically upon first write. No manual schema initialization SQL script is needed.
 
-Or using Node.js:
-```bash
-node -e "
-const { Pool } = require('pg');
-const fs = require('fs');
-require('dotenv').config();
-
-const pool = new Pool({ connectionString: process.env.DATABASE_URL });
-const sql = fs.readFileSync('../database/init.sql', 'utf8');
-
-pool.query(sql)
-  .then(() => console.log('Database initialized'))
-  .catch(err => console.error(err))
-  .finally(() => pool.end());
-"
-```
 
 ### Create Workspaces Directory
 

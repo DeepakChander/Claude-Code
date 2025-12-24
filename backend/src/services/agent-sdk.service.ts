@@ -5,6 +5,7 @@ import logger from '../utils/logger';
 import { openRouterConfig, getModelPricing, supportsReasoning } from '../config/openrouter';
 import { toolDefinitions, executeTool } from './tools.service';
 import { skillService } from './skill.service';
+import { ensureWorkspace } from './workspace.service';
 
 config();
 
@@ -1468,10 +1469,12 @@ export const runChatStreamingForWebSocket = async (
   sessionId: string,
   projectId: string,
   ws: import('ws').WebSocket,
-  _userId: string, // Prefixed with underscore since unused for now
+  userId: string,
   onApprovalNeeded?: (toolCallId: string, toolName: string, toolInput: Record<string, unknown>) => void
 ): Promise<void> => {
-  const workspacePath = process.cwd(); // Default to current directory
+  // CRITICAL SECURITY FIX: Use isolated workspace instead of process.cwd()
+  const workspacePath = await ensureWorkspace(userId, projectId);
+  logger.info('Using workspace for WebSocket chat', { userId, projectId, workspacePath });
   let totalTokensInput = 0;
   let totalTokensOutput = 0;
 
