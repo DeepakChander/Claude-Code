@@ -84,7 +84,7 @@ const seedUsers = async () => {
                 isActive: userData.isActive
             };
 
-            const result = await User.findOneAndUpdate(
+            await User.findOneAndUpdate(
                 { email: userData.email }, // Filter by email
                 updateData,
                 { upsert: true, new: true, setDefaultsOnInsert: true }
