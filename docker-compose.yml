@@ -1,6 +1,26 @@
 version: '3.8'
 
 services:
+  # 0. PostgreSQL for Windmill (local development)
+  postgres:
+    image: postgres:15-alpine
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_USER=windmill
+      - POSTGRES_PASSWORD=windmill123
+      - POSTGRES_DB=windmill
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - openanalyst-net
+    restart: always
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U windmill" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   # 1. Message Broker for Inter-Service Communication
   redis:
     image: redis:alpine
@@ -11,25 +31,28 @@ services:
     restart: always
 
   # 2. Windmill Server (Workflow Engine)
-  # Connects to EXTERNAL Supabase for its internal state
+  # Using local PostgreSQL for local development
   windmill_server:
     image: ghcr.io/windmill-labs/windmill:main
     ports:
       - "8000:8000"
     environment:
-      - DATABASE_URL=${WINDMILL_DATABASE_URL}
+      - DATABASE_URL=postgres://windmill:windmill123@postgres:5432/windmill
       - BASE_URL=http://localhost:8000
     networks:
       - openanalyst-net
     restart: always
     depends_on:
-      - redis
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
 
   # 3. Windmill Worker (Executes the code)
   windmill_worker:
     image: ghcr.io/windmill-labs/windmill:main
     environment:
-      - DATABASE_URL=${WINDMILL_DATABASE_URL}
+      - DATABASE_URL=postgres://windmill:windmill123@postgres:5432/windmill
       - BASE_URL=http://localhost:8000
       - MODE=worker
       - WORKER_GROUP=default
@@ -141,3 +164,6 @@ services:
 networks:
   openanalyst-net:
     driver: bridge
+
+volumes:
+  postgres_data:
