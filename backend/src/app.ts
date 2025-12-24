@@ -230,16 +230,33 @@ const startServer = async () => {
     const sslKeyPath = process.env.SSL_KEY_PATH;
     const sslCertPath = process.env.SSL_CERT_PATH;
 
-    if (sslKeyPath && sslCertPath && fs.existsSync(sslKeyPath) && fs.existsSync(sslCertPath)) {
-      // START HTTPS SERVER
-      const httpsOptions = {
-        key: fs.readFileSync(sslKeyPath),
-        cert: fs.readFileSync(sslCertPath),
-      };
-      server = https.createServer(httpsOptions, app);
-      protocol = 'https';
-      logger.info('Starting server in HTTPS/WSS mode');
+    console.log('--- SSL CONFIGURATION CHECK ---');
+    console.log(`SSL_KEY_PATH: ${sslKeyPath}`);
+    console.log(`SSL_CERT_PATH: ${sslCertPath}`);
+
+    if (sslKeyPath && sslCertPath) {
+      if (fs.existsSync(sslKeyPath) && fs.existsSync(sslCertPath)) {
+        // START HTTPS SERVER
+        console.log('✅ SSL Files found using fs.existsSync()');
+        const httpsOptions = {
+          key: fs.readFileSync(sslKeyPath),
+          cert: fs.readFileSync(sslCertPath),
+        };
+        server = https.createServer(httpsOptions, app);
+        protocol = 'https';
+        logger.info('Starting server in HTTPS/WSS mode');
+      } else {
+        console.error('❌ SSL Files specified but NOT FOUND on disk!');
+        console.error(`Check path: ${sslKeyPath}`);
+        console.error(`Check path: ${sslCertPath}`);
+        if (process.env.NODE_ENV === 'production') {
+          throw new Error('SSL Configuration Failed: Files missing');
+        }
+        // Fallback for local dev only
+        server = http.createServer(app);
+      }
     } else {
+      console.log('ℹ️ No SSL configuration found in env');
       // START HTTP SERVER
       server = http.createServer(app);
       logger.info('Starting server in HTTP/WS mode');
