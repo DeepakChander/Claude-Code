@@ -40,8 +40,7 @@ services:
     depends_on:
       - windmill_server
 
-  # 4. The Brain (Your Node.js Backend)
-  # Now running in a container, connecting to Redis + Mongo
+  # 4. The Brain (Node.js Backend - Claude CLI via OpenRouter)
   brain:
     build: ./services/brain
     ports:
@@ -53,6 +52,9 @@ services:
       - NODE_ENV=production
       - JWT_SECRET=${JWT_SECRET}
       - MASTER_API_KEY=${MASTER_API_KEY}
+      - ANTHROPIC_BASE_URL=${ANTHROPIC_BASE_URL}
+      - ANTHROPIC_AUTH_TOKEN=${ANTHROPIC_AUTH_TOKEN}
+      - ANTHROPIC_MODEL=${ANTHROPIC_MODEL}
     networks:
       - openanalyst-net
     volumes:
@@ -61,6 +63,62 @@ services:
     restart: always
     depends_on:
       - redis
+
+  # 5. WebSocket Hub (Real-time Communication Layer)
+  websocket-hub:
+    build: ./services/websocket-hub
+    ports:
+      - "8002:8002"
+    environment:
+      - PORT=8002
+      - HOST=0.0.0.0
+      - NODE_ENV=production
+      - JWT_SECRET=${JWT_SECRET}
+      - REDIS_URL=redis://redis:6379
+      - BRAIN_SERVICE_URL=http://brain:3456
+    networks:
+      - openanalyst-net
+    restart: always
+    depends_on:
+      - redis
+      - brain
+
+  # 6. Agno Orchestrator (Multi-Agent Coordination - Python/FastAPI)
+  agno:
+    build: ./services/agno
+    ports:
+      - "8001:8001"
+    environment:
+      - PORT=8001
+      - HOST=0.0.0.0
+      - JWT_SECRET=${JWT_SECRET}
+      - REDIS_URL=redis://redis:6379
+      - WINDMILL_URL=http://windmill_server:8000
+      - WINDMILL_TOKEN=${WINDMILL_TOKEN}
+      - WINDMILL_WORKSPACE=openanalyst
+      - BRAIN_SERVICE_URL=http://brain:3456
+    networks:
+      - openanalyst-net
+    restart: always
+    depends_on:
+      - redis
+      - brain
+      - windmill_server
+
+  # 7. Frontend (Next.js)
+  frontend:
+    build: ./frontend
+    ports:
+      - "3000:3000"
+    environment:
+      - NEXT_PUBLIC_WS_URL=ws://websocket-hub:8002/ws
+      - NEXT_PUBLIC_API_URL=http://brain:3456
+    networks:
+      - openanalyst-net
+    restart: always
+    depends_on:
+      - brain
+      - websocket-hub
 
 networks:
   openanalyst-net:

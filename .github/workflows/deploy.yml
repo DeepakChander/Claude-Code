@@ -1,0 +1,112 @@
+name: Deploy to Production
+
+on:
+  push:
+    branches: [main]
+    tags:
+      - 'v*'
+
+env:
+  AWS_REGION: eu-north-1
+  ECR_REGISTRY: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.eu-north-1.amazonaws.com
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Get version
+        id: version
+        run: |
+          if [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+          else
+            echo "VERSION=latest" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Build and push Brain
+        uses: docker/build-push-action@v5
+        with:
+          context: ./services/brain
+          push: true
+          tags: |
+            ${{ env.ECR_REGISTRY }}/openanalyst/brain:${{ steps.version.outputs.VERSION }}
+            ${{ env.ECR_REGISTRY }}/openanalyst/brain:latest
+
+      - name: Build and push WebSocket Hub
+        uses: docker/build-push-action@v5
+        with:
+          context: ./services/websocket-hub
+          push: true
+          tags: |
+            ${{ env.ECR_REGISTRY }}/openanalyst/websocket-hub:${{ steps.version.outputs.VERSION }}
+            ${{ env.ECR_REGISTRY }}/openanalyst/websocket-hub:latest
+
+      - name: Build and push Agno
+        uses: docker/build-push-action@v5
+        with:
+          context: ./services/agno
+          push: true
+          tags: |
+            ${{ env.ECR_REGISTRY }}/openanalyst/agno:${{ steps.version.outputs.VERSION }}
+            ${{ env.ECR_REGISTRY }}/openanalyst/agno:latest
+
+      - name: Build and push Frontend
+        uses: docker/build-push-action@v5
+        with:
+          context: ./frontend
+          push: true
+          tags: |
+            ${{ env.ECR_REGISTRY }}/openanalyst/frontend:${{ steps.version.outputs.VERSION }}
+            ${{ env.ECR_REGISTRY }}/openanalyst/frontend:latest
+
+  deploy:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Deploy to ECS
+        run: |
+          # Update ECS services to use new images
+          aws ecs update-service --cluster openanalyst --service brain --force-new-deployment
+          aws ecs update-service --cluster openanalyst --service websocket-hub --force-new-deployment
+          aws ecs update-service --cluster openanalyst --service agno --force-new-deployment
+          aws ecs update-service --cluster openanalyst --service frontend --force-new-deployment
+
+      - name: Wait for deployment
+        run: |
+          aws ecs wait services-stable --cluster openanalyst --services brain websocket-hub agno frontend
+
+      - name: Deployment notification
+        if: always()
+        run: |
+          echo "Deployment completed with status: ${{ job.status }}"
