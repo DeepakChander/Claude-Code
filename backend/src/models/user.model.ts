@@ -45,6 +45,14 @@ const userSchema = new Schema<IUser>(
   {
     timestamps: true,
     collection: 'users',
+    toJSON: {
+      virtuals: true,
+      versionKey: false,
+      transform: function (_doc, ret: Record<string, any>) {
+        delete ret._id;
+        delete ret.passwordHash;
+      },
+    },
   }
 );
 

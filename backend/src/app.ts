@@ -28,9 +28,7 @@ const NODE_ENV = process.env.NODE_ENV || 'development';
 app.set('trust proxy', 1);
 
 // Security middleware
-app.use(helmet({
-  contentSecurityPolicy: false, // Disable for SSE compatibility
-}));
+app.use(helmet());
 
 // CORS configuration
 app.use(cors({
@@ -187,7 +185,7 @@ app.use((err: Error, _req: Request, res: Response, _next: NextFunction) => {
     success: false,
     error: {
       code: 'INTERNAL_ERROR',
-      message: NODE_ENV === 'production' ? 'An unexpected error occurred' : err.message,
+      message: NODE_ENV === 'production' ? 'An internal server error occurred' : err.message,
     },
   });
 });

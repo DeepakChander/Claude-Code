@@ -85,8 +85,10 @@ export const optionalAuthMiddleware = (
       userId: decoded.userId,
       email: decoded.email,
     };
-  } catch {
+  } catch (error) {
     // Token invalid but we continue anyway
+    // Log this as a warning so potential frontend bugs are visible
+    console.warn('Optional auth failed with invalid token:', (error as Error).message);
   }
 
   next();
