@@ -14,6 +14,9 @@ if (!JWT_SECRET || JWT_SECRET === 'default-secret-change-me') {
 }
 const SAFE_JWT_SECRET = JWT_SECRET || 'dev-secret-not-for-production';
 
+// SECURITY: Master API key for direct authentication
+const MASTER_API_KEY = process.env.MASTER_API_KEY;
+
 // Authenticated user interface
 export interface AuthUser {
   userId: string;
@@ -25,20 +28,44 @@ export interface AuthRequest extends Request {
   user?: AuthUser;
 }
 
-// JWT verification middleware
+// JWT verification middleware with API key support
 export const authMiddleware = (
   req: AuthRequest,
   res: Response,
   next: NextFunction
 ): void => {
   const authHeader = req.headers.authorization;
+  const apiKey = req.headers['x-api-key'] as string | undefined;
 
+  // Option 1: Check for X-API-Key header (direct API key authentication)
+  if (apiKey) {
+    if (MASTER_API_KEY && apiKey === MASTER_API_KEY) {
+      // API key is valid - create a system user
+      req.user = {
+        userId: 'api-key-user',
+        email: 'api@openanalyst.com',
+      };
+      next();
+      return;
+    } else {
+      res.status(401).json({
+        success: false,
+        error: {
+          code: 'UNAUTHORIZED',
+          message: 'Invalid API key',
+        },
+      });
+      return;
+    }
+  }
+
+  // Option 2: Check for Bearer token (JWT authentication)
   if (!authHeader?.startsWith('Bearer ')) {
     res.status(401).json({
       success: false,
       error: {
         code: 'UNAUTHORIZED',
-        message: 'No token provided',
+        message: 'No token provided. Use Authorization: Bearer <token> or X-API-Key: <api-key>',
       },
     });
     return;
