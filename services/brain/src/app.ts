@@ -36,7 +36,7 @@ app.use(helmet());
 
 // CORS configuration - Allow all origins for desktop IDE compatibility
 app.use(cors({
-  origin: (origin, callback) => {
+  origin: (_origin, callback) => {
     // Allow requests with no origin (like mobile apps, curl, desktop IDEs)
     // or any origin (for browser requests)
     callback(null, true);
