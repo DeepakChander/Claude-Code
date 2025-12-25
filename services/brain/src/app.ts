@@ -34,12 +34,18 @@ app.set('trust proxy', 1);
 // Security middleware
 app.use(helmet());
 
-// CORS configuration
+// CORS configuration - Allow all origins for desktop IDE compatibility
 app.use(cors({
-  origin: NODE_ENV === 'production'
-    ? process.env.ALLOWED_ORIGINS?.split(',') || []
-    : '*',
+  origin: (origin, callback) => {
+    // Allow requests with no origin (like mobile apps, curl, desktop IDEs)
+    // or any origin (for browser requests)
+    callback(null, true);
+  },
   credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-API-Key', 'X-Requested-With', 'Accept', 'Origin'],
+  exposedHeaders: ['Content-Length', 'Content-Range'],
+  maxAge: 86400,
 }));
 
 // Compression
