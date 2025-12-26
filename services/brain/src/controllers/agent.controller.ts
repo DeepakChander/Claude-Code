@@ -109,7 +109,7 @@ export const runAgent = async (req: AuthRequest, res: Response): Promise<void> =
  */
 export const runAgentSync = async (req: AuthRequest, res: Response): Promise<void> => {
   const userId = req.user!.userId;
-  const { prompt, projectId = 'default', allowedTools, model, systemPrompt, maxTurns } = req.body as AgentRequestBody;
+  const { prompt, projectId, allowedTools, model, systemPrompt, maxTurns } = req.body as AgentRequestBody;
 
   // Validate request
   const { error } = validate(agentQuerySchema, req.body);
@@ -122,11 +122,15 @@ export const runAgentSync = async (req: AuthRequest, res: Response): Promise<voi
   }
 
   try {
+    // Enforce One Project Per User - auto-create if needed
+    const project = await ensureUserProject(userId, projectId);
+    const effectiveProjectId = project.projectId;
+
     // Ensure workspace exists
-    const workspace = await ensureWorkspace(userId, projectId);
+    const workspace = await ensureWorkspace(userId, effectiveProjectId);
 
     // Find or create conversation
-    const conversation = await conversationRepo.findOrCreateByProject(userId, projectId, model);
+    const conversation = await conversationRepo.findOrCreateByProject(userId, effectiveProjectId, model);
 
     // Log the query
     logAgentQuery(conversation.conversationId, prompt, userId);
@@ -187,7 +191,7 @@ export const runAgentSync = async (req: AuthRequest, res: Response): Promise<voi
  */
 export const continueAgent = async (req: AuthRequest, res: Response): Promise<void> => {
   const userId = req.user!.userId;
-  const { prompt, projectId = 'default', conversationId } = req.body as AgentRequestBody;
+  const { prompt, projectId, conversationId } = req.body as AgentRequestBody;
 
   if (!prompt) {
     res.status(400).json({
@@ -198,8 +202,12 @@ export const continueAgent = async (req: AuthRequest, res: Response): Promise<vo
   }
 
   try {
+    // Enforce One Project Per User - auto-create if needed
+    const project = await ensureUserProject(userId, projectId);
+    const effectiveProjectId = project.projectId;
+
     // Ensure workspace exists
-    const workspace = await ensureWorkspace(userId, projectId);
+    const workspace = await ensureWorkspace(userId, effectiveProjectId);
 
     // Get existing conversation or create new
     let conversation;
@@ -213,7 +221,7 @@ export const continueAgent = async (req: AuthRequest, res: Response): Promise<vo
         return;
       }
     } else {
-      conversation = await conversationRepo.findOrCreateByProject(userId, projectId);
+      conversation = await conversationRepo.findOrCreateByProject(userId, effectiveProjectId);
     }
 
     // Log the query
@@ -259,7 +267,7 @@ export const continueAgent = async (req: AuthRequest, res: Response): Promise<vo
  */
 export const runAgentSdk = async (req: AuthRequest, res: Response): Promise<void> => {
   const userId = req.user!.userId;
-  const { prompt, projectId = 'default', allowedTools, model, systemPrompt, maxTurns, conversationId } = req.body as AgentRequestBody;
+  const { prompt, projectId, allowedTools, model, systemPrompt, maxTurns, conversationId } = req.body as AgentRequestBody;
 
   // Validate request
   const { error } = validate(agentQuerySchema, req.body);
@@ -272,8 +280,12 @@ export const runAgentSdk = async (req: AuthRequest, res: Response): Promise<void
   }
 
   try {
+    // Enforce One Project Per User - auto-create if needed
+    const project = await ensureUserProject(userId, projectId);
+    const effectiveProjectId = project.projectId;
+
     // Ensure workspace exists
-    const workspace = await ensureWorkspace(userId, projectId);
+    const workspace = await ensureWorkspace(userId, effectiveProjectId);
 
     // Find or create conversation
     let conversation;
@@ -287,7 +299,7 @@ export const runAgentSdk = async (req: AuthRequest, res: Response): Promise<void
     }
 
     if (!conversation) {
-      conversation = await conversationRepo.findOrCreateByProject(userId, projectId, model);
+      conversation = await conversationRepo.findOrCreateByProject(userId, effectiveProjectId, model);
     }
 
     // Log the query
@@ -323,7 +335,7 @@ export const runAgentSdk = async (req: AuthRequest, res: Response): Promise<void
  */
 export const runAgentSdkSync = async (req: AuthRequest, res: Response): Promise<void> => {
   const userId = req.user!.userId;
-  const { prompt, projectId = 'default', allowedTools, model, systemPrompt, maxTurns, conversationId } = req.body as AgentRequestBody;
+  const { prompt, projectId, allowedTools, model, systemPrompt, maxTurns, conversationId } = req.body as AgentRequestBody;
 
   // Validate request
   const { error } = validate(agentQuerySchema, req.body);
@@ -336,8 +348,12 @@ export const runAgentSdkSync = async (req: AuthRequest, res: Response): Promise<
   }
 
   try {
+    // Enforce One Project Per User - auto-create if needed
+    const project = await ensureUserProject(userId, projectId);
+    const effectiveProjectId = project.projectId;
+
     // Ensure workspace exists
-    const workspace = await ensureWorkspace(userId, projectId);
+    const workspace = await ensureWorkspace(userId, effectiveProjectId);
 
     // Find or create conversation
     let conversation;
@@ -351,7 +367,7 @@ export const runAgentSdkSync = async (req: AuthRequest, res: Response): Promise<
     }
 
     if (!conversation) {
-      conversation = await conversationRepo.findOrCreateByProject(userId, projectId, model);
+      conversation = await conversationRepo.findOrCreateByProject(userId, effectiveProjectId, model);
     }
 
     // Log the query
@@ -428,7 +444,7 @@ export const runAgentSdkSync = async (req: AuthRequest, res: Response): Promise<
  */
 export const continueAgentSdk = async (req: AuthRequest, res: Response): Promise<void> => {
   const userId = req.user!.userId;
-  const { prompt, projectId = 'default', allowedTools, model, systemPrompt, maxTurns, conversationId } = req.body as AgentRequestBody;
+  const { prompt, projectId, allowedTools, model, systemPrompt, maxTurns, conversationId } = req.body as AgentRequestBody;
 
   if (!prompt) {
     res.status(400).json({
@@ -439,8 +455,12 @@ export const continueAgentSdk = async (req: AuthRequest, res: Response): Promise
   }
 
   try {
+    // Enforce One Project Per User - auto-create if needed
+    const project = await ensureUserProject(userId, projectId);
+    const effectiveProjectId = project.projectId;
+
     // Ensure workspace exists
-    const workspace = await ensureWorkspace(userId, projectId);
+    const workspace = await ensureWorkspace(userId, effectiveProjectId);
 
     // Get existing conversation with session ID
     let conversation;
@@ -450,7 +470,7 @@ export const continueAgentSdk = async (req: AuthRequest, res: Response): Promise
       conversation = await conversationRepo.findById(conversationId);
     } else {
       // Get the most recent conversation for this project
-      conversation = await conversationRepo.findOrCreateByProject(userId, projectId, model);
+      conversation = await conversationRepo.findOrCreateByProject(userId, effectiveProjectId, model);
     }
 
     if (conversation?.sessionId) {
@@ -498,7 +518,7 @@ export const continueAgentSdk = async (req: AuthRequest, res: Response): Promise
  */
 export const continueAgentSdkSync = async (req: AuthRequest, res: Response): Promise<void> => {
   const userId = req.user!.userId;
-  const { prompt, projectId = 'default', allowedTools, model, systemPrompt, maxTurns, conversationId } = req.body as AgentRequestBody;
+  const { prompt, projectId, allowedTools, model, systemPrompt, maxTurns, conversationId } = req.body as AgentRequestBody;
 
   if (!prompt) {
     res.status(400).json({
@@ -509,8 +529,12 @@ export const continueAgentSdkSync = async (req: AuthRequest, res: Response): Pro
   }
 
   try {
+    // Enforce One Project Per User - auto-create if needed
+    const project = await ensureUserProject(userId, projectId);
+    const effectiveProjectId = project.projectId;
+
     // Ensure workspace exists
-    const workspace = await ensureWorkspace(userId, projectId);
+    const workspace = await ensureWorkspace(userId, effectiveProjectId);
 
     // Get existing conversation with session ID
     let conversation;
@@ -519,7 +543,7 @@ export const continueAgentSdkSync = async (req: AuthRequest, res: Response): Pro
     if (conversationId) {
       conversation = await conversationRepo.findById(conversationId);
     } else {
-      conversation = await conversationRepo.findOrCreateByProject(userId, projectId, model);
+      conversation = await conversationRepo.findOrCreateByProject(userId, effectiveProjectId, model);
     }
 
     if (conversation?.sessionId) {
@@ -1080,7 +1104,7 @@ export const getConversationDetails = async (req: AuthRequest, res: Response): P
  */
 export const runAgentChat = async (req: AuthRequest, res: Response): Promise<void> => {
   const userId = req.user!.userId;
-  const { prompt, projectId = 'default', model, systemPrompt, conversationId, messages, clientSkills } = req.body as AgentRequestBody & {
+  const { prompt, projectId, model, systemPrompt, conversationId, messages, clientSkills } = req.body as AgentRequestBody & {
     messages?: Array<{ role: 'user' | 'assistant'; content: string }>;
   };
 
@@ -1095,8 +1119,12 @@ export const runAgentChat = async (req: AuthRequest, res: Response): Promise<voi
   }
 
   try {
+    // Enforce One Project Per User - auto-create if needed
+    const project = await ensureUserProject(userId, projectId);
+    const effectiveProjectId = project.projectId;
+
     // Ensure workspace exists
-    const workspace = await ensureWorkspace(userId, projectId);
+    const workspace = await ensureWorkspace(userId, effectiveProjectId);
 
     // Find or create conversation
     let conversation;
@@ -1110,7 +1138,7 @@ export const runAgentChat = async (req: AuthRequest, res: Response): Promise<voi
     }
 
     if (!conversation) {
-      conversation = await conversationRepo.findOrCreateByProject(userId, projectId, model);
+      conversation = await conversationRepo.findOrCreateByProject(userId, effectiveProjectId, model);
     }
 
     // Log the query
@@ -1146,7 +1174,7 @@ export const runAgentChat = async (req: AuthRequest, res: Response): Promise<voi
  */
 export const submitToolResults = async (req: AuthRequest, res: Response): Promise<void> => {
   const userId = req.user!.userId;
-  const { sessionId, toolResults, projectId = 'default', model, clientSkills } = req.body as {
+  const { sessionId, toolResults, projectId, model, clientSkills } = req.body as {
     sessionId: string;
     toolResults: Array<{ tool_use_id: string; output: string; is_error: boolean }>;
     projectId?: string;
@@ -1163,8 +1191,12 @@ export const submitToolResults = async (req: AuthRequest, res: Response): Promis
   }
 
   try {
+    // Enforce One Project Per User - auto-create if needed
+    const project = await ensureUserProject(userId, projectId);
+    const effectiveProjectId = project.projectId;
+
     // Ensure workspace exists
-    const workspace = await ensureWorkspace(userId, projectId);
+    const workspace = await ensureWorkspace(userId, effectiveProjectId);
 
     logger.info('Submitting tool results from client', {
       userId,
@@ -1196,7 +1228,7 @@ export const submitToolResults = async (req: AuthRequest, res: Response): Promis
  */
 export const runOrchestrated = async (req: AuthRequest, res: Response): Promise<void> => {
   const userId = req.user!.userId;
-  const { prompt, projectId = 'default', model, systemPrompt: userSystemPrompt, maxTurns } = req.body as AgentRequestBody;
+  const { prompt, projectId, model, systemPrompt: userSystemPrompt, maxTurns } = req.body as AgentRequestBody;
 
   // Validate request
   const { error } = validate(agentQuerySchema, req.body);
@@ -1209,11 +1241,15 @@ export const runOrchestrated = async (req: AuthRequest, res: Response): Promise<
   }
 
   try {
+    // Enforce One Project Per User - auto-create if needed
+    const project = await ensureUserProject(userId, projectId);
+    const effectiveProjectId = project.projectId;
+
     // Ensure workspace exists
-    const workspace = await ensureWorkspace(userId, projectId);
+    const workspace = await ensureWorkspace(userId, effectiveProjectId);
 
     // Find or create conversation
-    const conversation = await conversationRepo.findOrCreateByProject(userId, projectId, model);
+    const conversation = await conversationRepo.findOrCreateByProject(userId, effectiveProjectId, model);
 
     // Log the query
     logAgentQuery(conversation.conversationId, prompt, userId);
