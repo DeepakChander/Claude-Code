@@ -3,6 +3,8 @@
 
 import { createClient, RedisClientType } from 'redis';
 import { orchestrationService } from './orchestration.service';
+import { runSdkSync } from './agent-sdk.service';
+import { ensureWorkspace } from './workspace.service';
 import logger from '../utils/logger';
 
 const REDIS_URL = process.env.REDIS_URL || 'redis://localhost:6379';
@@ -145,9 +147,37 @@ async function handleBrainRequest(message: RedisMessage): Promise<void> {
         responseContent = agnoResponse.error || 'Task failed';
       }
     } else {
-      // Would need to call Claude here for non-Agno routes
-      // For now, return a message indicating routing
-      responseContent = `Request matched skill "${result.skill || 'CORE'}" and will be processed.`;
+      // Call Claude AI for non-Agno routes (CORE skill, theoretical questions, etc.)
+      try {
+        const projectId = (payload.projectId as string) || 'default';
+        const workspacePath = await ensureWorkspace(userId, projectId);
+
+        logger.info('Calling Claude AI for non-Agno request', {
+          userId,
+          skill: result.skill,
+          projectId,
+        });
+
+        const sdkResult = await runSdkSync(content, workspacePath, {
+          model: 'claude-sonnet-4-20250514',
+          systemPrompt: result.skill ? `You are an AI assistant specialized in ${result.skill}. Provide helpful, accurate, and detailed responses.` : undefined,
+          maxTurns: 10,
+        });
+
+        responseContent = sdkResult.output;
+
+        logger.info('Claude AI response received', {
+          userId,
+          responseLength: responseContent.length,
+        });
+      } catch (aiError) {
+        logger.error('Failed to get AI response', {
+          error: (aiError as Error).message,
+          userId,
+        });
+        success = false;
+        responseContent = `Failed to process request: ${(aiError as Error).message}`;
+      }
     }
 
     // Send response
