@@ -1554,44 +1554,643 @@ streamQuery('Explain React hooks').then(console.log);
 
 ## WebSocket Connection
 
-The API supports WebSocket connections for real-time communication.
+The WebSocket Hub provides real-time bidirectional communication for the OpenAnalyst IDE.
 
-### Connection URL
+---
 
-```
-wss://api.openanalyst.com/ws
-```
+### WebSocket Server Information
 
-### JavaScript Example
+| Property | Value |
+|----------|-------|
+| **WebSocket URL** | `wss://api.openanalyst.com/ws` |
+| **Health Check URL** | `https://api.openanalyst.com:8002/health` |
+| **Protocol** | WebSocket (WSS) |
+| **Path** | `/ws` |
+| **Heartbeat Interval** | 30 seconds |
+
+---
+
+### Step 1: Get a JWT Token First
+
+Before connecting to WebSocket, you need a JWT token. Get one from the REST API:
 
 ```javascript
 const API_KEY = '714ed5871abaea99811747d8a34577c8c0929359cf7e2a2e2e27aca562c0eab1';
 
-const ws = new WebSocket('wss://api.openanalyst.com/ws');
-
-ws.onopen = () => {
-  console.log('Connected to WebSocket');
-
-  // Authenticate
-  ws.send(JSON.stringify({
-    type: 'auth',
+// Get JWT token
+const response = await fetch('https://api.openanalyst.com/api/auth/token', {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({
+    userId: 'user123',
+    email: 'user@example.com',
     apiKey: API_KEY
-  }));
+  })
+});
+
+const { data } = await response.json();
+const JWT_TOKEN = data.token;  // Use this for WebSocket connection
+```
+
+---
+
+### Step 2: Connect to WebSocket
+
+Connect to WebSocket by passing the JWT token as a URL parameter:
+
+```javascript
+const JWT_TOKEN = 'your-jwt-token-from-step-1';
+
+// Connect with token in URL
+const ws = new WebSocket(`wss://api.openanalyst.com/ws?token=${JWT_TOKEN}`);
+```
+
+---
+
+### Step 3: Handle Connection Events
+
+```javascript
+const JWT_TOKEN = 'your-jwt-token';
+
+const ws = new WebSocket(`wss://api.openanalyst.com/ws?token=${JWT_TOKEN}`);
+
+// Connection opened
+ws.onopen = () => {
+  console.log('Connected to OpenAnalyst WebSocket');
 };
 
+// Receive messages
 ws.onmessage = (event) => {
-  const data = JSON.parse(event.data);
-  console.log('Received:', data);
+  const message = JSON.parse(event.data);
+  console.log('Received:', message.type, message.payload);
+
+  // Handle different message types
+  switch (message.type) {
+    case 'CONNECTED':
+      console.log('Session ID:', message.payload.sessionId);
+      break;
+    case 'ASSISTANT_TYPING':
+      console.log('Assistant is typing...');
+      break;
+    case 'ASSISTANT_CHUNK':
+      console.log('Chunk:', message.payload.content);
+      break;
+    case 'ASSISTANT_RESPONSE':
+      console.log('Response:', message.payload.content);
+      break;
+    case 'TASK_PROGRESS':
+      console.log('Progress:', message.payload.progress, '%');
+      break;
+    case 'TASK_COMPLETE':
+      console.log('Task completed:', message.payload.result);
+      break;
+    case 'TASK_ERROR':
+      console.error('Task error:', message.payload.message);
+      break;
+    case 'ERROR':
+      console.error('Error:', message.payload.message);
+      break;
+    case 'PONG':
+      console.log('Pong received');
+      break;
+  }
 };
 
+// Connection closed
+ws.onclose = (event) => {
+  console.log('Disconnected:', event.code, event.reason);
+};
+
+// Connection error
 ws.onerror = (error) => {
   console.error('WebSocket error:', error);
 };
-
-ws.onclose = () => {
-  console.log('Disconnected from WebSocket');
-};
 ```
+
+---
+
+### Message Types
+
+#### Messages You Can SEND (Client -> Server)
+
+| Type | Description | When to Use |
+|------|-------------|-------------|
+| `USER_REQUEST` | Send a query to the AI agent | When user types a message |
+| `PING` | Keep connection alive | Every 25-30 seconds |
+
+#### Messages You Will RECEIVE (Server -> Client)
+
+| Type | Description | What It Contains |
+|------|-------------|------------------|
+| `CONNECTED` | Connection confirmed | `sessionId` - your session ID |
+| `ASSISTANT_TYPING` | Agent is processing | `typing: true` |
+| `ASSISTANT_CHUNK` | Streaming response part | `content` - text chunk |
+| `ASSISTANT_RESPONSE` | Complete response | `content`, `done`, `metadata` |
+| `TASK_PROGRESS` | Long task update | `taskId`, `status`, `progress`, `message` |
+| `TASK_COMPLETE` | Task finished | `taskId`, `result` |
+| `TASK_ERROR` | Task failed | `taskId`, `message` |
+| `PONG` | Response to PING | `timestamp` |
+| `ERROR` | Error occurred | `message` |
+
+---
+
+### Sending Messages
+
+#### Send a Query (USER_REQUEST)
+
+```javascript
+// Send a query to the AI agent
+ws.send(JSON.stringify({
+  type: 'USER_REQUEST',
+  payload: {
+    content: 'Explain React hooks',
+    conversationId: 'optional-conversation-id',
+    metadata: {
+      source: 'ide',
+      language: 'javascript'
+    }
+  }
+}));
+```
+
+**USER_REQUEST Payload Fields:**
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `content` | string | YES | The query or message |
+| `conversationId` | string | NO | Resume existing conversation |
+| `attachments` | string[] | NO | File paths or content |
+| `metadata` | object | NO | Additional context |
+
+---
+
+#### Send a Ping (PING)
+
+```javascript
+// Keep the connection alive
+ws.send(JSON.stringify({
+  type: 'PING',
+  payload: {}
+}));
+```
+
+---
+
+### Message Format
+
+#### All Messages Follow This Structure:
+
+```typescript
+interface WSMessage {
+  type: string;           // Message type (e.g., 'USER_REQUEST')
+  userId: string;         // Your user ID (auto-filled by server)
+  sessionId: string;      // Your session ID (auto-filled by server)
+  payload: object;        // Message-specific data
+  timestamp: number;      // Unix timestamp (auto-filled)
+  messageId: string;      // Unique message ID (auto-generated)
+  correlationId?: string; // Links request to response
+}
+```
+
+---
+
+### Receiving Messages - Detailed Payloads
+
+#### CONNECTED
+
+Received immediately after successful connection.
+
+```json
+{
+  "type": "CONNECTED",
+  "userId": "user123",
+  "sessionId": "abc-123-def-456",
+  "payload": {
+    "message": "Connected to OpenAnalyst",
+    "sessionId": "abc-123-def-456"
+  },
+  "timestamp": 1703587200000,
+  "messageId": "msg-001"
+}
+```
+
+---
+
+#### ASSISTANT_TYPING
+
+Received when the agent starts processing your query.
+
+```json
+{
+  "type": "ASSISTANT_TYPING",
+  "userId": "user123",
+  "sessionId": "abc-123-def-456",
+  "payload": {
+    "typing": true
+  },
+  "timestamp": 1703587200100,
+  "messageId": "msg-002",
+  "correlationId": "msg-001"
+}
+```
+
+---
+
+#### ASSISTANT_CHUNK
+
+Received multiple times during streaming response.
+
+```json
+{
+  "type": "ASSISTANT_CHUNK",
+  "userId": "user123",
+  "sessionId": "abc-123-def-456",
+  "payload": {
+    "content": "React hooks are functions that let you"
+  },
+  "timestamp": 1703587200200,
+  "messageId": "msg-003",
+  "correlationId": "msg-001"
+}
+```
+
+---
+
+#### ASSISTANT_RESPONSE
+
+Received when the response is complete.
+
+```json
+{
+  "type": "ASSISTANT_RESPONSE",
+  "userId": "user123",
+  "sessionId": "abc-123-def-456",
+  "payload": {
+    "messageId": "msg-004",
+    "content": "React hooks are functions that let you use state and other React features in functional components...",
+    "done": true,
+    "metadata": {
+      "skill": "general",
+      "duration": 2500,
+      "tokens": 150
+    }
+  },
+  "timestamp": 1703587202700,
+  "messageId": "msg-004",
+  "correlationId": "msg-001"
+}
+```
+
+---
+
+#### TASK_PROGRESS
+
+Received during long-running tasks.
+
+```json
+{
+  "type": "TASK_PROGRESS",
+  "userId": "user123",
+  "sessionId": "abc-123-def-456",
+  "payload": {
+    "taskId": "task-789",
+    "status": "running",
+    "progress": 45,
+    "message": "Analyzing code structure..."
+  },
+  "timestamp": 1703587203000,
+  "messageId": "msg-005"
+}
+```
+
+**Task Status Values:**
+
+| Status | Description |
+|--------|-------------|
+| `pending` | Task queued, not started |
+| `running` | Task in progress |
+| `completed` | Task finished successfully |
+| `failed` | Task failed |
+
+---
+
+#### TASK_COMPLETE
+
+Received when a long-running task finishes.
+
+```json
+{
+  "type": "TASK_COMPLETE",
+  "userId": "user123",
+  "sessionId": "abc-123-def-456",
+  "payload": {
+    "taskId": "task-789",
+    "status": "completed",
+    "result": {
+      "summary": "Analysis complete",
+      "findings": ["..."]
+    }
+  },
+  "timestamp": 1703587210000,
+  "messageId": "msg-006"
+}
+```
+
+---
+
+#### TASK_ERROR
+
+Received when a task fails.
+
+```json
+{
+  "type": "TASK_ERROR",
+  "userId": "user123",
+  "sessionId": "abc-123-def-456",
+  "payload": {
+    "taskId": "task-789",
+    "status": "failed",
+    "message": "Failed to analyze: file not found"
+  },
+  "timestamp": 1703587210000,
+  "messageId": "msg-007"
+}
+```
+
+---
+
+#### ERROR
+
+Received when there's a general error.
+
+```json
+{
+  "type": "ERROR",
+  "userId": "user123",
+  "sessionId": "abc-123-def-456",
+  "payload": {
+    "message": "Invalid message format"
+  },
+  "timestamp": 1703587200000,
+  "messageId": "msg-008"
+}
+```
+
+---
+
+#### PONG
+
+Received in response to PING.
+
+```json
+{
+  "type": "PONG",
+  "userId": "user123",
+  "sessionId": "abc-123-def-456",
+  "payload": {
+    "timestamp": 1703587200000
+  },
+  "timestamp": 1703587200000,
+  "messageId": "msg-009"
+}
+```
+
+---
+
+### Connection Close Codes
+
+| Code | Reason | Description |
+|------|--------|-------------|
+| 1000 | Normal | Clean disconnect |
+| 1001 | Going Away | Server shutting down |
+| 4001 | Authentication Required | No token provided |
+| 4002 | Invalid Token | Token is invalid or expired |
+
+---
+
+### Complete WebSocket Client Example
+
+```typescript
+// openanalyst-websocket-client.ts
+
+const API_KEY = '714ed5871abaea99811747d8a34577c8c0929359cf7e2a2e2e27aca562c0eab1';
+const API_BASE = 'https://api.openanalyst.com';
+const WS_URL = 'wss://api.openanalyst.com/ws';
+
+interface WSMessage {
+  type: string;
+  userId: string;
+  sessionId: string;
+  payload: any;
+  timestamp: number;
+  messageId: string;
+  correlationId?: string;
+}
+
+class OpenAnalystWebSocket {
+  private ws: WebSocket | null = null;
+  private token: string | null = null;
+  private sessionId: string | null = null;
+  private pingInterval: NodeJS.Timeout | null = null;
+  private messageHandlers: Map<string, (message: WSMessage) => void> = new Map();
+
+  // Get JWT token from API
+  async authenticate(userId: string, email?: string): Promise<string> {
+    const response = await fetch(`${API_BASE}/api/auth/token`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ userId, email, apiKey: API_KEY })
+    });
+
+    const { data } = await response.json();
+    this.token = data.token;
+    return this.token;
+  }
+
+  // Connect to WebSocket
+  connect(): Promise<string> {
+    return new Promise((resolve, reject) => {
+      if (!this.token) {
+        reject(new Error('Call authenticate() first'));
+        return;
+      }
+
+      this.ws = new WebSocket(`${WS_URL}?token=${this.token}`);
+
+      this.ws.onopen = () => {
+        console.log('WebSocket connected');
+        this.startPingInterval();
+      };
+
+      this.ws.onmessage = (event) => {
+        const message: WSMessage = JSON.parse(event.data);
+        this.handleMessage(message);
+
+        if (message.type === 'CONNECTED') {
+          this.sessionId = message.payload.sessionId;
+          resolve(this.sessionId);
+        }
+      };
+
+      this.ws.onclose = (event) => {
+        console.log('WebSocket closed:', event.code, event.reason);
+        this.stopPingInterval();
+      };
+
+      this.ws.onerror = (error) => {
+        console.error('WebSocket error:', error);
+        reject(error);
+      };
+    });
+  }
+
+  // Send a query to the agent
+  sendQuery(content: string, conversationId?: string): void {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      throw new Error('WebSocket not connected');
+    }
+
+    this.ws.send(JSON.stringify({
+      type: 'USER_REQUEST',
+      payload: {
+        content,
+        conversationId
+      }
+    }));
+  }
+
+  // Register a handler for a specific message type
+  on(messageType: string, handler: (message: WSMessage) => void): void {
+    this.messageHandlers.set(messageType, handler);
+  }
+
+  // Handle incoming messages
+  private handleMessage(message: WSMessage): void {
+    const handler = this.messageHandlers.get(message.type);
+    if (handler) {
+      handler(message);
+    }
+
+    // Also emit to wildcard handler
+    const wildcardHandler = this.messageHandlers.get('*');
+    if (wildcardHandler) {
+      wildcardHandler(message);
+    }
+  }
+
+  // Start ping interval
+  private startPingInterval(): void {
+    this.pingInterval = setInterval(() => {
+      if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+        this.ws.send(JSON.stringify({ type: 'PING', payload: {} }));
+      }
+    }, 25000);
+  }
+
+  // Stop ping interval
+  private stopPingInterval(): void {
+    if (this.pingInterval) {
+      clearInterval(this.pingInterval);
+      this.pingInterval = null;
+    }
+  }
+
+  // Disconnect
+  disconnect(): void {
+    this.stopPingInterval();
+    if (this.ws) {
+      this.ws.close(1000, 'Client disconnect');
+      this.ws = null;
+    }
+  }
+
+  // Get session ID
+  getSessionId(): string | null {
+    return this.sessionId;
+  }
+}
+
+// Usage Example
+async function main() {
+  const client = new OpenAnalystWebSocket();
+
+  // Step 1: Authenticate
+  await client.authenticate('user123', 'user@example.com');
+  console.log('Authenticated');
+
+  // Step 2: Register message handlers
+  client.on('ASSISTANT_TYPING', (msg) => {
+    console.log('Agent is typing...');
+  });
+
+  client.on('ASSISTANT_CHUNK', (msg) => {
+    process.stdout.write(msg.payload.content);
+  });
+
+  client.on('ASSISTANT_RESPONSE', (msg) => {
+    console.log('\n--- Response complete ---');
+    console.log('Tokens used:', msg.payload.metadata?.tokens);
+  });
+
+  client.on('ERROR', (msg) => {
+    console.error('Error:', msg.payload.message);
+  });
+
+  // Step 3: Connect
+  const sessionId = await client.connect();
+  console.log('Connected, session:', sessionId);
+
+  // Step 4: Send a query
+  client.sendQuery('What is TypeScript?');
+
+  // Wait for response (in real app, use proper async handling)
+  setTimeout(() => {
+    client.disconnect();
+  }, 30000);
+}
+
+main().catch(console.error);
+```
+
+---
+
+### WebSocket Health Check
+
+Check if the WebSocket Hub is running:
+
+```javascript
+fetch('https://api.openanalyst.com:8002/health')
+  .then(res => res.json())
+  .then(data => console.log(data));
+```
+
+**Response:**
+
+```json
+{
+  "status": "healthy",
+  "service": "websocket-hub",
+  "timestamp": "2024-12-26T10:00:00.000Z",
+  "connections": {
+    "total": 5,
+    "byUser": {
+      "user123": 2,
+      "user456": 3
+    }
+  }
+}
+```
+
+---
+
+### Troubleshooting WebSocket
+
+| Error | Cause | Solution |
+|-------|-------|----------|
+| Close code 4001 | No token in URL | Add `?token=YOUR_JWT_TOKEN` to URL |
+| Close code 4002 | Invalid/expired token | Get a new token from `/api/auth/token` |
+| Connection refused | Server not running | Check server health endpoint |
+| No PONG response | Connection dead | Reconnect to WebSocket |
 
 ---
 
