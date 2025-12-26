@@ -14,6 +14,7 @@ export const create = async (
     const conversation = new Conversation({
       conversationId: generateUUID(),
       userId,
+      projectId: input.projectId || input.workspace_path || 'default',
       title: input.title || 'New Conversation',
       workspacePath: input.workspace_path || '',
       modelUsed: input.model || 'anthropic/claude-sonnet-4',

@@ -71,6 +71,7 @@ export interface ConversationCreateInput {
   title?: string;
   description?: string;
   workspace_path?: string;
+  projectId?: string;
   model?: string;
   tags?: string[];
   metadata?: Record<string, unknown>;
