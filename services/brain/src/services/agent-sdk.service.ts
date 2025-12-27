@@ -15,6 +15,55 @@ const client = new Anthropic({
   apiKey: openRouterConfig.authToken,
 });
 
+/**
+ * Retry helper with exponential backoff for 429 errors
+ */
+const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
+const fetchWithRetry = async (
+  url: string,
+  options: RequestInit,
+  maxRetries: number = 3,
+  baseDelay: number = 1000
+): Promise<globalThis.Response> => {
+  let lastError: Error | null = null;
+
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      const response = await fetch(url, options);
+
+      // If rate limited (429), wait and retry
+      if (response.status === 429) {
+        const retryAfter = response.headers.get('Retry-After');
+        const waitTime = retryAfter
+          ? parseInt(retryAfter, 10) * 1000
+          : baseDelay * Math.pow(2, attempt);
+
+        logger.warn(`Rate limited (429), waiting ${waitTime}ms before retry ${attempt + 1}/${maxRetries}`, {
+          attempt,
+          waitTime,
+        });
+
+        if (attempt < maxRetries) {
+          await sleep(waitTime);
+          continue;
+        }
+      }
+
+      return response;
+    } catch (error) {
+      lastError = error as Error;
+      logger.warn(`Fetch attempt ${attempt + 1} failed`, { error: lastError.message });
+
+      if (attempt < maxRetries) {
+        await sleep(baseDelay * Math.pow(2, attempt));
+      }
+    }
+  }
+
+  throw lastError || new Error('Max retries exceeded');
+};
+
 export interface SdkOptions {
   // Core options
   allowedTools?: string[];
@@ -801,8 +850,8 @@ export const runChatStreaming = async (
       messageCount: messages.length,
     });
 
-    // Use fetch for true streaming (OpenRouter compatible)
-    const streamResponse = await fetch(`${openRouterConfig.baseUrl}/v1/chat/completions`, {
+    // Use fetch with retry for true streaming (OpenRouter compatible)
+    const streamResponse = await fetchWithRetry(`${openRouterConfig.baseUrl}/v1/chat/completions`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -1241,8 +1290,8 @@ export const submitToolResults = async (
       messageCount: messages.length,
     });
 
-    // Use fetch with OpenAI format - same as runChatStreaming
-    const streamResponse = await fetch(`${openRouterConfig.baseUrl}/v1/chat/completions`, {
+    // Use fetch with retry - same as runChatStreaming
+    const streamResponse = await fetchWithRetry(`${openRouterConfig.baseUrl}/v1/chat/completions`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -1517,8 +1566,8 @@ export const runChatStreamingForWebSocket = async (
       tools: getOpenAITools(),
     };
 
-    // Make streaming request to OpenRouter
-    const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+    // Make streaming request to OpenRouter with retry
+    const response = await fetchWithRetry('https://openrouter.ai/api/v1/chat/completions', {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${openRouterConfig.authToken}`,

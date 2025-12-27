@@ -80,10 +80,10 @@ app.use((req: Request, _res: Response, next: NextFunction) => {
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
-// Rate limiting
+// Rate limiting - increased limits for production use
 const limiter = rateLimit({
   windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS || '60000', 10),
-  max: parseInt(process.env.RATE_LIMIT_MAX_REQUESTS || '100', 10),
+  max: parseInt(process.env.RATE_LIMIT_MAX_REQUESTS || '1000', 10), // Increased from 100 to 1000
   standardHeaders: true,
   legacyHeaders: false,
   message: {
@@ -93,6 +93,8 @@ const limiter = rateLimit({
       message: 'Too many requests, please try again later',
     },
   },
+  // Skip rate limiting for health checks
+  skip: (req) => req.path === '/health',
 });
 app.use('/api/', limiter);
 
