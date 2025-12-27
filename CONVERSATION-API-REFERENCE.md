@@ -1,67 +1,59 @@
 # Conversation Management API Reference
 
 **Version:** 2.0.0
-**Base URL:** `http://13.49.125.60:3456`
 **Last Updated:** December 27, 2025
 
 ---
 
-## Overview
+## Server URLs (HTTPS/WSS)
 
-The Conversation Management API allows frontend applications to manage user chat conversations. It provides endpoints to list, retrieve, update, and delete conversations, as well as generate AI-powered titles for chats.
+| Service | URL | Description |
+|---------|-----|-------------|
+| **Brain API** | `https://13.49.125.60:3456` | Main REST API |
+| **WebSocket Hub** | `wss://13.49.125.60:8002/ws` | Real-time WebSocket |
+| **Health Check (API)** | `https://13.49.125.60:3456/health` | API health |
+| **Health Check (WS)** | `https://13.49.125.60:8002/health` | WebSocket health |
 
 ---
 
 ## Authentication
 
-All endpoints require authentication. Use one of the following methods:
+All endpoints require authentication. Include ONE of these headers:
 
-| Method | Header | Description |
-|--------|--------|-------------|
-| API Key | `X-API-Key: <api_key>` | Direct API key authentication |
-| JWT Token | `Authorization: Bearer <token>` | JWT token from auth endpoint |
-
----
-
-## Endpoints Summary
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| GET | `/api/conversations` | List all conversations |
-| GET | `/api/conversations/:id` | Get single conversation with messages |
-| POST | `/api/conversations/:id/generate-title` | Generate AI-powered title |
-| PUT | `/api/conversations/:id/title` | Update title manually |
-| PATCH | `/api/conversations/:id` | Update conversation (archive/pin) |
-| DELETE | `/api/conversations/:id` | Delete conversation |
+| Method | Header | Example |
+|--------|--------|---------|
+| **API Key** | `X-API-Key` | `X-API-Key: your-api-key-here` |
+| **JWT Token** | `Authorization` | `Authorization: Bearer eyJhbGciOiJIUzI1...` |
 
 ---
 
-## 1. List All Conversations
+## Conversation Endpoints
 
-Retrieves all conversations for the authenticated user with pagination support.
+### 1. List All Conversations
 
-**Endpoint:** `GET /api/conversations`
-
-### Query Parameters
-
-| Parameter | Type | Required | Default | Description |
-|-----------|------|----------|---------|-------------|
-| limit | number | No | 50 | Maximum results (max: 100) |
-| offset | number | No | 0 | Pagination offset |
-| archived | boolean | No | false | Include archived conversations |
-| sortBy | string | No | lastMessageAt | Sort field |
-| sortOrder | string | No | desc | Sort order (asc/desc) |
-
-### Request Example
-
+**Full URL:**
 ```
-GET /api/conversations?limit=20&offset=0&archived=false
+GET https://13.49.125.60:3456/api/conversations
 ```
 
-### Response
+**Query Parameters:**
 
-**Success (200 OK):**
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `limit` | number | 50 | Max results (1-100) |
+| `offset` | number | 0 | Pagination offset |
+| `archived` | boolean | false | Include archived |
+| `sortBy` | string | lastMessageAt | Sort field |
+| `sortOrder` | string | desc | asc or desc |
 
+**Example Request:**
+```
+GET https://13.49.125.60:3456/api/conversations?limit=20&offset=0
+Headers:
+  X-API-Key: your-api-key
+```
+
+**Success Response (200):**
 ```json
 {
   "success": true,
@@ -90,52 +82,36 @@ GET /api/conversations?limit=20&offset=0&archived=false
 }
 ```
 
-### Response Fields
-
-| Field | Type | Description |
-|-------|------|-------------|
-| conversationId | string | Unique conversation identifier (UUID) |
-| sessionId | string | Session ID for resume functionality |
-| projectId | string | Associated project ID |
-| title | string | Conversation title (AI-generated or manual) |
-| messageCount | number | Total messages in conversation |
-| lastMessageAt | string | ISO timestamp of last message |
-| createdAt | string | ISO timestamp of creation |
-| isArchived | boolean | Whether conversation is archived |
-| isPinned | boolean | Whether conversation is pinned |
-| modelUsed | string | AI model used for this conversation |
-
 ---
 
-## 2. Get Single Conversation
+### 2. Get Single Conversation
 
-Retrieves a specific conversation with its messages.
+**Full URL:**
+```
+GET https://13.49.125.60:3456/api/conversations/{conversationId}
+```
 
-**Endpoint:** `GET /api/conversations/:conversationId`
-
-### Path Parameters
+**Path Parameters:**
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| conversationId | string | Yes | Conversation UUID |
+| `conversationId` | string | Yes | Conversation UUID |
 
-### Query Parameters
+**Query Parameters:**
 
-| Parameter | Type | Required | Default | Description |
-|-----------|------|----------|---------|-------------|
-| includeMessages | boolean | No | true | Include messages in response |
-| messageLimit | number | No | 100 | Maximum messages (max: 500) |
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `includeMessages` | boolean | true | Include messages |
+| `messageLimit` | number | 100 | Max messages (1-500) |
 
-### Request Example
-
+**Example Request:**
 ```
-GET /api/conversations/ebbab469-8910-4d4a-bdd1-204dcc5153a8?includeMessages=true&messageLimit=50
+GET https://13.49.125.60:3456/api/conversations/ebbab469-8910-4d4a-bdd1-204dcc5153a8?includeMessages=true
+Headers:
+  X-API-Key: your-api-key
 ```
 
-### Response
-
-**Success (200 OK):**
-
+**Success Response (200):**
 ```json
 {
   "success": true,
@@ -160,7 +136,7 @@ GET /api/conversations/ebbab469-8910-4d4a-bdd1-204dcc5153a8?includeMessages=true
       {
         "messageId": "8ab3e9d9-1493-46ad-932c-f79a44364b2b",
         "role": "user",
-        "content": "What are hooks in React? Explain in 2 sentences.",
+        "content": "What are hooks in React?",
         "createdAt": "2025-12-26T15:21:47.023Z",
         "tokensInput": 0,
         "tokensOutput": 0
@@ -178,59 +154,51 @@ GET /api/conversations/ebbab469-8910-4d4a-bdd1-204dcc5153a8?includeMessages=true
 }
 ```
 
-### Message Fields
-
-| Field | Type | Description |
-|-------|------|-------------|
-| messageId | string | Unique message identifier (UUID) |
-| role | string | Message role: "user" or "assistant" |
-| content | string | Message content text |
-| createdAt | string | ISO timestamp of message creation |
-| tokensInput | number | Input tokens used (for assistant messages) |
-| tokensOutput | number | Output tokens used (for assistant messages) |
-
-### Error Responses
-
-| Status | Code | Description |
-|--------|------|-------------|
-| 404 | NOT_FOUND | Conversation not found |
-| 403 | FORBIDDEN | Not authorized to access this conversation |
+**Error Response (404):**
+```json
+{
+  "success": false,
+  "error": {
+    "code": "NOT_FOUND",
+    "message": "Conversation not found"
+  }
+}
+```
 
 ---
 
-## 3. Generate AI Title
+### 3. Generate AI Title
 
-Generates an AI-powered title for a conversation based on the first user message. Uses Claude Haiku for fast, cost-effective generation.
+**Full URL:**
+```
+POST https://13.49.125.60:3456/api/conversations/{conversationId}/generate-title
+```
 
-**Endpoint:** `POST /api/conversations/:conversationId/generate-title`
-
-### Path Parameters
+**Path Parameters:**
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| conversationId | string | Yes | Conversation UUID |
+| `conversationId` | string | Yes | Conversation UUID |
 
-### Request Body
+**Request Body:**
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| regenerate | boolean | No | false | Force regeneration of existing title |
+| `regenerate` | boolean | No | false | Force regenerate existing title |
 
-### Request Example
-
+**Example Request:**
 ```
-POST /api/conversations/ebbab469-8910-4d4a-bdd1-204dcc5153a8/generate-title
-Content-Type: application/json
-
+POST https://13.49.125.60:3456/api/conversations/ebbab469-8910-4d4a-bdd1-204dcc5153a8/generate-title
+Headers:
+  X-API-Key: your-api-key
+  Content-Type: application/json
+Body:
 {
   "regenerate": true
 }
 ```
 
-### Response
-
-**Success (200 OK):**
-
+**Success Response (200):**
 ```json
 {
   "success": true,
@@ -244,59 +212,54 @@ Content-Type: application/json
 }
 ```
 
-### Response Fields
-
-| Field | Type | Description |
-|-------|------|-------------|
-| conversationId | string | Conversation UUID |
-| title | string | Newly generated title (5-10 words) |
-| previousTitle | string | Previous title before generation |
-| generatedAt | string | ISO timestamp of generation |
-| model | string | AI model used for generation |
-
-### Error Responses
-
-| Status | Code | Description |
-|--------|------|-------------|
-| 404 | NOT_FOUND | Conversation not found |
-| 400 | NO_MESSAGES | No user messages found to generate title |
-| 409 | TITLE_EXISTS | Title already exists (use regenerate=true) |
+**Error Response (409):**
+```json
+{
+  "success": false,
+  "error": {
+    "code": "TITLE_EXISTS",
+    "message": "Title already exists. Set regenerate=true to generate a new one."
+  },
+  "data": {
+    "currentTitle": "React Hooks Discussion"
+  }
+}
+```
 
 ---
 
-## 4. Update Title Manually
+### 4. Update Title Manually
 
-Allows manual update of a conversation title.
+**Full URL:**
+```
+PUT https://13.49.125.60:3456/api/conversations/{conversationId}/title
+```
 
-**Endpoint:** `PUT /api/conversations/:conversationId/title`
-
-### Path Parameters
+**Path Parameters:**
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| conversationId | string | Yes | Conversation UUID |
+| `conversationId` | string | Yes | Conversation UUID |
 
-### Request Body
+**Request Body:**
 
 | Field | Type | Required | Constraints | Description |
 |-------|------|----------|-------------|-------------|
-| title | string | Yes | 1-100 characters | New title for conversation |
+| `title` | string | Yes | 1-100 chars | New title |
 
-### Request Example
-
+**Example Request:**
 ```
-PUT /api/conversations/ebbab469-8910-4d4a-bdd1-204dcc5153a8/title
-Content-Type: application/json
-
+PUT https://13.49.125.60:3456/api/conversations/ebbab469-8910-4d4a-bdd1-204dcc5153a8/title
+Headers:
+  X-API-Key: your-api-key
+  Content-Type: application/json
+Body:
 {
   "title": "My React Learning Session"
 }
 ```
 
-### Response
-
-**Success (200 OK):**
-
+**Success Response (200):**
 ```json
 {
   "success": true,
@@ -308,62 +271,55 @@ Content-Type: application/json
 }
 ```
 
-### Error Responses
-
-| Status | Code | Description |
-|--------|------|-------------|
-| 404 | NOT_FOUND | Conversation not found |
-| 400 | VALIDATION_ERROR | Title is required or invalid length |
-
 ---
 
-## 5. Update Conversation (Archive/Pin)
+### 5. Update Conversation (Archive/Pin)
 
-Updates conversation properties like archive status or pinned state.
+**Full URL:**
+```
+PATCH https://13.49.125.60:3456/api/conversations/{conversationId}
+```
 
-**Endpoint:** `PATCH /api/conversations/:conversationId`
-
-### Path Parameters
+**Path Parameters:**
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| conversationId | string | Yes | Conversation UUID |
+| `conversationId` | string | Yes | Conversation UUID |
 
-### Request Body
+**Request Body:**
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| isArchived | boolean | No | Set archive status |
-| isPinned | boolean | No | Set pinned status |
+| `isArchived` | boolean | No | Set archive status |
+| `isPinned` | boolean | No | Set pinned status |
 
 At least one field must be provided.
 
-### Request Example - Pin Conversation
-
+**Example Request - Pin Conversation:**
 ```
-PATCH /api/conversations/ebbab469-8910-4d4a-bdd1-204dcc5153a8
-Content-Type: application/json
-
+PATCH https://13.49.125.60:3456/api/conversations/ebbab469-8910-4d4a-bdd1-204dcc5153a8
+Headers:
+  X-API-Key: your-api-key
+  Content-Type: application/json
+Body:
 {
   "isPinned": true
 }
 ```
 
-### Request Example - Archive Conversation
-
+**Example Request - Archive Conversation:**
 ```
-PATCH /api/conversations/ebbab469-8910-4d4a-bdd1-204dcc5153a8
-Content-Type: application/json
-
+PATCH https://13.49.125.60:3456/api/conversations/ebbab469-8910-4d4a-bdd1-204dcc5153a8
+Headers:
+  X-API-Key: your-api-key
+  Content-Type: application/json
+Body:
 {
   "isArchived": true
 }
 ```
 
-### Response
-
-**Success (200 OK):**
-
+**Success Response (200):**
 ```json
 {
   "success": true,
@@ -376,49 +332,42 @@ Content-Type: application/json
 }
 ```
 
-### Error Responses
-
-| Status | Code | Description |
-|--------|------|-------------|
-| 404 | NOT_FOUND | Conversation not found |
-| 400 | VALIDATION_ERROR | No valid fields to update |
-
 ---
 
-## 6. Delete Conversation
+### 6. Delete Conversation
 
-Deletes a conversation. By default, performs a soft delete (archives). Use `permanent=true` for hard delete.
+**Full URL:**
+```
+DELETE https://13.49.125.60:3456/api/conversations/{conversationId}
+```
 
-**Endpoint:** `DELETE /api/conversations/:conversationId`
-
-### Path Parameters
+**Path Parameters:**
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| conversationId | string | Yes | Conversation UUID |
+| `conversationId` | string | Yes | Conversation UUID |
 
-### Query Parameters
+**Query Parameters:**
 
-| Parameter | Type | Required | Default | Description |
-|-----------|------|----------|---------|-------------|
-| permanent | boolean | No | false | If true, permanently deletes conversation and all messages |
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `permanent` | boolean | false | Permanently delete if true |
 
-### Request Example - Soft Delete (Archive)
-
+**Example Request - Soft Delete (Archive):**
 ```
-DELETE /api/conversations/b580f83a-b9b2-44c9-be8d-496338501803
-```
-
-### Request Example - Hard Delete (Permanent)
-
-```
-DELETE /api/conversations/b580f83a-b9b2-44c9-be8d-496338501803?permanent=true
+DELETE https://13.49.125.60:3456/api/conversations/b580f83a-b9b2-44c9-be8d-496338501803
+Headers:
+  X-API-Key: your-api-key
 ```
 
-### Response
+**Example Request - Hard Delete (Permanent):**
+```
+DELETE https://13.49.125.60:3456/api/conversations/b580f83a-b9b2-44c9-be8d-496338501803?permanent=true
+Headers:
+  X-API-Key: your-api-key
+```
 
-**Success (200 OK) - Soft Delete:**
-
+**Success Response (200) - Soft Delete:**
 ```json
 {
   "success": true,
@@ -430,8 +379,7 @@ DELETE /api/conversations/b580f83a-b9b2-44c9-be8d-496338501803?permanent=true
 }
 ```
 
-**Success (200 OK) - Hard Delete:**
-
+**Success Response (200) - Hard Delete:**
 ```json
 {
   "success": true,
@@ -443,31 +391,21 @@ DELETE /api/conversations/b580f83a-b9b2-44c9-be8d-496338501803?permanent=true
 }
 ```
 
-### Error Responses
-
-| Status | Code | Description |
-|--------|------|-------------|
-| 404 | NOT_FOUND | Conversation not found |
-
 ---
 
 ## Auto-Generated Titles
 
-When a user sends their first message to the AI, the system automatically generates a title for the conversation. This happens transparently in the background.
+When a user sends their first message, the system automatically generates a title.
 
-### How It Works
+**How It Works:**
 
-1. User sends first message via `/api/agent/sdk/run-sync` or similar endpoint
+1. User sends first message via chat endpoint
 2. AI generates response
-3. System checks if conversation title is "New Conversation"
-4. If yes, Claude Haiku generates a 5-10 word summary title
-5. Title is saved to database
-6. Response includes `conversationTitle` and `titleGenerated` fields
+3. System checks if title is "New Conversation"
+4. If yes, Claude Haiku generates a 5-10 word title
+5. Title is saved and returned in response
 
-### Auto-Title Response Fields
-
-When using agent endpoints, the response includes:
-
+**Agent Response with Auto-Title:**
 ```json
 {
   "success": true,
@@ -486,125 +424,107 @@ When using agent endpoints, the response includes:
 }
 ```
 
-| Field | Type | Description |
-|-------|------|-------------|
-| conversationTitle | string | Current or newly generated title |
-| titleGenerated | boolean | true if title was just generated |
-
 ---
 
-## Error Response Format
+## WebSocket Connection
 
-All error responses follow this format:
-
-```json
-{
-  "success": false,
-  "error": {
-    "code": "ERROR_CODE",
-    "message": "Human-readable error message"
-  }
-}
+**Full URL:**
+```
+wss://13.49.125.60:8002/ws?token={jwt_token}
 ```
 
-### Common Error Codes
+**Connection Example:**
+```javascript
+const token = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...";
+const ws = new WebSocket(`wss://13.49.125.60:8002/ws?token=${token}`);
 
-| Code | Status | Description |
-|------|--------|-------------|
-| UNAUTHORIZED | 401 | Missing or invalid authentication |
-| FORBIDDEN | 403 | Not authorized to access resource |
-| NOT_FOUND | 404 | Resource not found |
-| VALIDATION_ERROR | 400 | Invalid input data |
-| SERVER_ERROR | 500 | Internal server error |
+ws.onopen = () => {
+  console.log('Connected to WebSocket');
+};
 
----
-
-## Rate Limits
-
-| Limit | Value | Description |
-|-------|-------|-------------|
-| Requests per minute | 10,000 | Per IP + API key combination |
-| Max conversations per request | 100 | Pagination limit |
-| Max messages per request | 500 | Message limit |
+ws.onmessage = (event) => {
+  const message = JSON.parse(event.data);
+  console.log('Received:', message);
+};
+```
 
 ---
 
-## Database Schema Reference
+## Error Codes
 
-### Conversations Collection
+| Code | HTTP Status | Description |
+|------|-------------|-------------|
+| `UNAUTHORIZED` | 401 | Missing or invalid authentication |
+| `FORBIDDEN` | 403 | Not authorized to access resource |
+| `NOT_FOUND` | 404 | Resource not found |
+| `VALIDATION_ERROR` | 400 | Invalid input data |
+| `TITLE_EXISTS` | 409 | Title exists, use regenerate=true |
+| `NO_MESSAGES` | 400 | No messages to generate title |
+| `SERVER_ERROR` | 500 | Internal server error |
+
+---
+
+## Response Fields Reference
+
+### Conversation Object
 
 | Field | Type | Description |
 |-------|------|-------------|
-| conversationId | String (UUID) | Primary identifier |
-| userId | String | User who owns conversation |
-| projectId | String | Associated project |
-| title | String | Chat title (max 500 chars) |
-| sessionId | String | For resume functionality |
-| messageCount | Number | Total messages |
-| isArchived | Boolean | Soft delete flag |
-| isPinned | Boolean | Pin to top |
-| totalTokensUsed | Number | Total token usage |
-| totalCostUsd | Number | Total cost |
-| lastMessageAt | Date | Last activity timestamp |
-| createdAt | Date | Creation timestamp |
-| updatedAt | Date | Last update timestamp |
+| `conversationId` | string | Unique UUID |
+| `sessionId` | string | Session ID for resume |
+| `projectId` | string | Associated project |
+| `title` | string | Chat title (max 500 chars) |
+| `messageCount` | number | Total messages |
+| `totalTokensUsed` | number | Token usage |
+| `totalCostUsd` | number | Total cost |
+| `isArchived` | boolean | Archive status |
+| `isPinned` | boolean | Pinned status |
+| `modelUsed` | string | AI model used |
+| `lastMessageAt` | string | ISO timestamp |
+| `createdAt` | string | ISO timestamp |
+| `updatedAt` | string | ISO timestamp |
 
-### Messages Collection
+### Message Object
 
 | Field | Type | Description |
 |-------|------|-------------|
-| messageId | String (UUID) | Primary identifier |
-| conversationId | String | Parent conversation |
-| role | String | "user" or "assistant" |
-| content | String | Message text |
-| tokensInput | Number | Input tokens |
-| tokensOutput | Number | Output tokens |
-| costUsd | Number | Message cost |
-| createdAt | Date | Creation timestamp |
+| `messageId` | string | Unique UUID |
+| `role` | string | "user" or "assistant" |
+| `content` | string | Message text |
+| `tokensInput` | number | Input tokens |
+| `tokensOutput` | number | Output tokens |
+| `createdAt` | string | ISO timestamp |
 
 ---
 
-## Quick Start for Frontend
+## Quick Reference
 
-### 1. List User's Chats
+| Action | Method | Full Endpoint |
+|--------|--------|---------------|
+| List chats | GET | `https://13.49.125.60:3456/api/conversations` |
+| Get chat | GET | `https://13.49.125.60:3456/api/conversations/{id}` |
+| Generate title | POST | `https://13.49.125.60:3456/api/conversations/{id}/generate-title` |
+| Update title | PUT | `https://13.49.125.60:3456/api/conversations/{id}/title` |
+| Pin/Archive | PATCH | `https://13.49.125.60:3456/api/conversations/{id}` |
+| Delete | DELETE | `https://13.49.125.60:3456/api/conversations/{id}` |
+| WebSocket | WSS | `wss://13.49.125.60:8002/ws?token={token}` |
+| Health (API) | GET | `https://13.49.125.60:3456/health` |
+| Health (WS) | GET | `https://13.49.125.60:8002/health` |
 
-```
-GET /api/conversations
-Headers: X-API-Key: <your-api-key>
-```
+---
 
-### 2. Open a Chat
+## SSL Certificate Note
 
-```
-GET /api/conversations/<conversationId>
-Headers: X-API-Key: <your-api-key>
-```
+The server uses a self-signed SSL certificate. For API clients:
 
-### 3. Rename a Chat
+- **curl:** Use `-k` flag to skip certificate verification
+- **Node.js/axios:** Set `rejectUnauthorized: false` in HTTPS agent
+- **Browser:** Accept the certificate warning once
 
-```
-PUT /api/conversations/<conversationId>/title
-Headers: X-API-Key: <your-api-key>
-Body: { "title": "New Chat Name" }
-```
-
-### 4. Pin/Unpin a Chat
-
-```
-PATCH /api/conversations/<conversationId>
-Headers: X-API-Key: <your-api-key>
-Body: { "isPinned": true }
-```
-
-### 5. Delete a Chat
-
-```
-DELETE /api/conversations/<conversationId>
-Headers: X-API-Key: <your-api-key>
-```
+For production, recommend upgrading to Let's Encrypt certificate with a proper domain.
 
 ---
 
 ## Support
 
-For issues or questions, contact the backend team or create an issue in the repository.
+For issues or questions, contact the backend team.
