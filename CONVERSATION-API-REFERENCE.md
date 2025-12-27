@@ -9,10 +9,15 @@
 
 | Service | URL | Description |
 |---------|-----|-------------|
-| **Brain API** | `https://13.49.125.60:3456` | Main REST API |
-| **WebSocket Hub** | `wss://13.49.125.60:8002/ws` | Real-time WebSocket |
-| **Health Check (API)** | `https://13.49.125.60:3456/health` | API health |
-| **Health Check (WS)** | `https://13.49.125.60:8002/health` | WebSocket health |
+| **Brain API** | `https://api.openanalyst.com` | Main REST API (Production) |
+| **WebSocket Hub** | `wss://api.openanalyst.com/ws` | Real-time WebSocket |
+| **Health Check** | `https://api.openanalyst.com/health` | API health |
+
+**Alternative (Direct IP):**
+| Service | URL |
+|---------|-----|
+| Brain API | `https://api.openanalyst.com` |
+| WebSocket | `wss://13.49.125.60:8002/ws` |
 
 ---
 
@@ -33,7 +38,7 @@ All endpoints require authentication. Include ONE of these headers:
 
 **Full URL:**
 ```
-GET https://13.49.125.60:3456/api/conversations
+GET https://api.openanalyst.com/api/conversations
 ```
 
 **Query Parameters:**
@@ -48,7 +53,7 @@ GET https://13.49.125.60:3456/api/conversations
 
 **Example Request:**
 ```
-GET https://13.49.125.60:3456/api/conversations?limit=20&offset=0
+GET https://api.openanalyst.com/api/conversations?limit=20&offset=0
 Headers:
   X-API-Key: your-api-key
 ```
@@ -88,7 +93,7 @@ Headers:
 
 **Full URL:**
 ```
-GET https://13.49.125.60:3456/api/conversations/{conversationId}
+GET https://api.openanalyst.com/api/conversations/{conversationId}
 ```
 
 **Path Parameters:**
@@ -106,7 +111,7 @@ GET https://13.49.125.60:3456/api/conversations/{conversationId}
 
 **Example Request:**
 ```
-GET https://13.49.125.60:3456/api/conversations/ebbab469-8910-4d4a-bdd1-204dcc5153a8?includeMessages=true
+GET https://api.openanalyst.com/api/conversations/ebbab469-8910-4d4a-bdd1-204dcc5153a8?includeMessages=true
 Headers:
   X-API-Key: your-api-key
 ```
@@ -171,7 +176,7 @@ Headers:
 
 **Full URL:**
 ```
-POST https://13.49.125.60:3456/api/conversations/{conversationId}/generate-title
+POST https://api.openanalyst.com/api/conversations/{conversationId}/generate-title
 ```
 
 **Path Parameters:**
@@ -188,7 +193,7 @@ POST https://13.49.125.60:3456/api/conversations/{conversationId}/generate-title
 
 **Example Request:**
 ```
-POST https://13.49.125.60:3456/api/conversations/ebbab469-8910-4d4a-bdd1-204dcc5153a8/generate-title
+POST https://api.openanalyst.com/api/conversations/ebbab469-8910-4d4a-bdd1-204dcc5153a8/generate-title
 Headers:
   X-API-Key: your-api-key
   Content-Type: application/json
@@ -232,7 +237,7 @@ Body:
 
 **Full URL:**
 ```
-PUT https://13.49.125.60:3456/api/conversations/{conversationId}/title
+PUT https://api.openanalyst.com/api/conversations/{conversationId}/title
 ```
 
 **Path Parameters:**
@@ -249,7 +254,7 @@ PUT https://13.49.125.60:3456/api/conversations/{conversationId}/title
 
 **Example Request:**
 ```
-PUT https://13.49.125.60:3456/api/conversations/ebbab469-8910-4d4a-bdd1-204dcc5153a8/title
+PUT https://api.openanalyst.com/api/conversations/ebbab469-8910-4d4a-bdd1-204dcc5153a8/title
 Headers:
   X-API-Key: your-api-key
   Content-Type: application/json
@@ -277,7 +282,7 @@ Body:
 
 **Full URL:**
 ```
-PATCH https://13.49.125.60:3456/api/conversations/{conversationId}
+PATCH https://api.openanalyst.com/api/conversations/{conversationId}
 ```
 
 **Path Parameters:**
@@ -297,7 +302,7 @@ At least one field must be provided.
 
 **Example Request - Pin Conversation:**
 ```
-PATCH https://13.49.125.60:3456/api/conversations/ebbab469-8910-4d4a-bdd1-204dcc5153a8
+PATCH https://api.openanalyst.com/api/conversations/ebbab469-8910-4d4a-bdd1-204dcc5153a8
 Headers:
   X-API-Key: your-api-key
   Content-Type: application/json
@@ -309,7 +314,7 @@ Body:
 
 **Example Request - Archive Conversation:**
 ```
-PATCH https://13.49.125.60:3456/api/conversations/ebbab469-8910-4d4a-bdd1-204dcc5153a8
+PATCH https://api.openanalyst.com/api/conversations/ebbab469-8910-4d4a-bdd1-204dcc5153a8
 Headers:
   X-API-Key: your-api-key
   Content-Type: application/json
@@ -338,7 +343,7 @@ Body:
 
 **Full URL:**
 ```
-DELETE https://13.49.125.60:3456/api/conversations/{conversationId}
+DELETE https://api.openanalyst.com/api/conversations/{conversationId}
 ```
 
 **Path Parameters:**
@@ -355,14 +360,14 @@ DELETE https://13.49.125.60:3456/api/conversations/{conversationId}
 
 **Example Request - Soft Delete (Archive):**
 ```
-DELETE https://13.49.125.60:3456/api/conversations/b580f83a-b9b2-44c9-be8d-496338501803
+DELETE https://api.openanalyst.com/api/conversations/b580f83a-b9b2-44c9-be8d-496338501803
 Headers:
   X-API-Key: your-api-key
 ```
 
 **Example Request - Hard Delete (Permanent):**
 ```
-DELETE https://13.49.125.60:3456/api/conversations/b580f83a-b9b2-44c9-be8d-496338501803?permanent=true
+DELETE https://api.openanalyst.com/api/conversations/b580f83a-b9b2-44c9-be8d-496338501803?permanent=true
 Headers:
   X-API-Key: your-api-key
 ```
@@ -430,13 +435,13 @@ When a user sends their first message, the system automatically generates a titl
 
 **Full URL:**
 ```
-wss://13.49.125.60:8002/ws?token={jwt_token}
+wss://api.openanalyst.com/ws?token={jwt_token}
 ```
 
 **Connection Example:**
 ```javascript
 const token = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...";
-const ws = new WebSocket(`wss://13.49.125.60:8002/ws?token=${token}`);
+const ws = new WebSocket(`wss://api.openanalyst.com/ws?token=${token}`);
 
 ws.onopen = () => {
   console.log('Connected to WebSocket');
@@ -501,27 +506,27 @@ ws.onmessage = (event) => {
 
 | Action | Method | Full Endpoint |
 |--------|--------|---------------|
-| List chats | GET | `https://13.49.125.60:3456/api/conversations` |
-| Get chat | GET | `https://13.49.125.60:3456/api/conversations/{id}` |
-| Generate title | POST | `https://13.49.125.60:3456/api/conversations/{id}/generate-title` |
-| Update title | PUT | `https://13.49.125.60:3456/api/conversations/{id}/title` |
-| Pin/Archive | PATCH | `https://13.49.125.60:3456/api/conversations/{id}` |
-| Delete | DELETE | `https://13.49.125.60:3456/api/conversations/{id}` |
-| WebSocket | WSS | `wss://13.49.125.60:8002/ws?token={token}` |
-| Health (API) | GET | `https://13.49.125.60:3456/health` |
-| Health (WS) | GET | `https://13.49.125.60:8002/health` |
+| List chats | GET | `https://api.openanalyst.com/api/conversations` |
+| Get chat | GET | `https://api.openanalyst.com/api/conversations/{id}` |
+| Generate title | POST | `https://api.openanalyst.com/api/conversations/{id}/generate-title` |
+| Update title | PUT | `https://api.openanalyst.com/api/conversations/{id}/title` |
+| Pin/Archive | PATCH | `https://api.openanalyst.com/api/conversations/{id}` |
+| Delete | DELETE | `https://api.openanalyst.com/api/conversations/{id}` |
+| WebSocket | WSS | `wss://api.openanalyst.com/ws?token={token}` |
+| Health | GET | `https://api.openanalyst.com/health` |
 
 ---
 
 ## SSL Certificate Note
 
-The server uses a self-signed SSL certificate. For API clients:
+**Production Domain (`api.openanalyst.com`):**
+- Uses Let's Encrypt SSL certificate
+- Trusted by all browsers and clients
+- No special configuration needed
 
-- **curl:** Use `-k` flag to skip certificate verification
-- **Node.js/axios:** Set `rejectUnauthorized: false` in HTTPS agent
-- **Browser:** Accept the certificate warning once
-
-For production, recommend upgrading to Let's Encrypt certificate with a proper domain.
+**Direct IP Access (`13.49.125.60`):**
+- Uses self-signed certificate
+- May require `-k` flag in curl or `rejectUnauthorized: false` in Node.js
 
 ---
 
