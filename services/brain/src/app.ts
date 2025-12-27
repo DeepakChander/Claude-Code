@@ -180,6 +180,14 @@ app.get('/', (_req: Request, res: Response) => {
         conversations: 'GET /api/agent/conversations',
         messages: 'GET /api/agent/conversations/:id/messages',
       },
+      conversations: {
+        list: 'GET /api/conversations',
+        get: 'GET /api/conversations/:id',
+        generateTitle: 'POST /api/conversations/:id/generate-title',
+        updateTitle: 'PUT /api/conversations/:id/title',
+        update: 'PATCH /api/conversations/:id',
+        delete: 'DELETE /api/conversations/:id',
+      },
       pendingResponses: {
         list: 'GET /api/pending-responses',
         deliver: 'GET /api/pending-responses/deliver',
@@ -192,6 +200,7 @@ app.get('/', (_req: Request, res: Response) => {
       conversationResume: 'Resume previous conversations with full context',
       offlineDelivery: 'Retrieve responses when you reconnect',
       messageQueue: 'High-load handling with Kafka',
+      aiTitleGeneration: 'Auto-generate conversation titles using Claude Haiku',
     },
   });
 });

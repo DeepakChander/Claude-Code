@@ -6,6 +6,7 @@ import * as cliService from '../services/agent-cli.service';
 import * as sdkService from '../services/agent-sdk.service';
 import { ensureUserProject } from '../services/project.service';
 import { orchestrationService } from '../services/orchestration.service';
+import { generateTitleFromMessage, needsTitleGeneration } from '../services/title-generation.service';
 import * as conversationRepo from '../repositories/conversation.repository';
 import * as messageRepo from '../repositories/message.repository';
 import logger, { logAgentQuery } from '../utils/logger';
@@ -164,12 +165,35 @@ export const runAgentSync = async (req: AuthRequest, res: Response): Promise<voi
       typeof parsedOutput === 'string' ? parsedOutput : JSON.stringify(parsedOutput)
     );
 
+    // Auto-generate title if this is the first response and title is default
+    let conversationTitle = conversation.title;
+    let titleGenerated = false;
+
+    if (result.success && needsTitleGeneration(conversation.title)) {
+      try {
+        const titleResult = await generateTitleFromMessage(prompt);
+        conversationTitle = titleResult.title;
+        titleGenerated = true;
+        await conversationRepo.update(conversation.conversationId, { title: titleResult.title });
+        logger.info('Auto-generated conversation title', {
+          conversationId: conversation.conversationId,
+          title: titleResult.title,
+        });
+      } catch (titleError) {
+        logger.warn('Failed to auto-generate title', {
+          error: (titleError as Error).message,
+        });
+      }
+    }
+
     res.json({
       success: result.success,
       data: {
         result: parsedOutput,
         conversationId: conversation.conversationId,
         sessionId: result.sessionId,
+        conversationTitle,
+        titleGenerated,
       },
     });
   } catch (error) {
@@ -412,12 +436,42 @@ export const runAgentSdkSync = async (req: AuthRequest, res: Response): Promise<
       }
     );
 
+    // Auto-generate title if this is the first response and title is default
+    let conversationTitle = conversation.title;
+    let titleGenerated = false;
+
+    if (result.success && needsTitleGeneration(conversation.title)) {
+      try {
+        // Generate title from the user's first message (the prompt)
+        const titleResult = await generateTitleFromMessage(prompt);
+        conversationTitle = titleResult.title;
+        titleGenerated = true;
+
+        // Save the generated title
+        await conversationRepo.update(conversation.conversationId, { title: titleResult.title });
+
+        logger.info('Auto-generated conversation title', {
+          conversationId: conversation.conversationId,
+          title: titleResult.title,
+          model: titleResult.model,
+        });
+      } catch (titleError) {
+        // Title generation is non-blocking - log error but continue
+        logger.warn('Failed to auto-generate title', {
+          conversationId: conversation.conversationId,
+          error: (titleError as Error).message,
+        });
+      }
+    }
+
     res.json({
       success: result.success,
       data: {
         result: result.output,
         conversationId: conversation.conversationId,
         sessionId: result.sessionId,
+        conversationTitle,
+        titleGenerated,
         usage: {
           tokensInput: result.tokensInput,
           tokensOutput: result.tokensOutput,
