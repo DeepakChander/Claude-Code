@@ -80,10 +80,13 @@ app.use((req: Request, _res: Response, next: NextFunction) => {
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
-// Rate limiting - increased limits for production use
+// Rate limiting - configurable for scaling
+// For high traffic (1000+ users): Set RATE_LIMIT_MAX_REQUESTS=10000 or higher
+// For unlimited: Set RATE_LIMIT_ENABLED=false
+const rateLimitEnabled = process.env.RATE_LIMIT_ENABLED !== 'false';
 const limiter = rateLimit({
-  windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS || '60000', 10),
-  max: parseInt(process.env.RATE_LIMIT_MAX_REQUESTS || '1000', 10), // Increased from 100 to 1000
+  windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS || '60000', 10), // 1 minute window
+  max: parseInt(process.env.RATE_LIMIT_MAX_REQUESTS || '10000', 10), // 10000 requests/minute default
   standardHeaders: true,
   legacyHeaders: false,
   message: {
@@ -93,8 +96,14 @@ const limiter = rateLimit({
       message: 'Too many requests, please try again later',
     },
   },
-  // Skip rate limiting for health checks
-  skip: (req) => req.path === '/health',
+  // Skip rate limiting for health checks or if disabled
+  skip: (req) => req.path === '/health' || !rateLimitEnabled,
+  // Use IP + API key for rate limiting (better for multiple users)
+  keyGenerator: (req) => {
+    const apiKey = req.headers['x-api-key'] || req.headers['authorization'] || '';
+    const ip = req.ip || req.connection.remoteAddress || '';
+    return `${ip}-${apiKey}`;
+  },
 });
 app.use('/api/', limiter);
 
