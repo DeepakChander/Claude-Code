@@ -2,7 +2,9 @@ import { config } from 'dotenv';
 config();
 
 import { WebSocketServer } from 'ws';
-import { createServer } from 'http';
+import { createServer as createHttpServer } from 'http';
+import { createServer as createHttpsServer } from 'https';
+import * as fs from 'fs';
 import { v4 as uuidv4 } from 'uuid';
 import { AuthenticatedSocket, MessageType } from './types';
 import { verifyToken, extractTokenFromUrl } from './services/auth.service';
@@ -15,8 +17,12 @@ const PORT = parseInt(process.env.PORT || '8002', 10);
 const HOST = process.env.HOST || '0.0.0.0';
 const HEARTBEAT_INTERVAL = 30000; // 30 seconds
 
-// Create HTTP server for health checks
-const server = createServer((req, res) => {
+// SSL Configuration
+const sslKeyPath = process.env.SSL_KEY_PATH;
+const sslCertPath = process.env.SSL_CERT_PATH;
+
+// Health check handler
+const healthHandler = (req: any, res: any) => {
   if (req.url === '/health') {
     const stats = connectionManager.getStats();
     res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -32,7 +38,28 @@ const server = createServer((req, res) => {
     res.writeHead(404);
     res.end('Not Found');
   }
-});
+};
+
+// Determine protocol and create server
+let server: ReturnType<typeof createHttpServer> | ReturnType<typeof createHttpsServer>;
+let protocol = 'ws';
+
+console.log('--- WebSocket Hub SSL CHECK ---');
+console.log(`SSL_KEY_PATH: ${sslKeyPath}`);
+console.log(`SSL_CERT_PATH: ${sslCertPath}`);
+
+if (sslKeyPath && sslCertPath && fs.existsSync(sslKeyPath) && fs.existsSync(sslCertPath)) {
+  console.log('✅ SSL Files found - starting HTTPS/WSS server');
+  const httpsOptions = {
+    key: fs.readFileSync(sslKeyPath),
+    cert: fs.readFileSync(sslCertPath),
+  };
+  server = createHttpsServer(httpsOptions, healthHandler);
+  protocol = 'wss';
+} else {
+  console.log('ℹ️ No SSL configuration - starting HTTP/WS server');
+  server = createHttpServer(healthHandler);
+}
 
 // Create WebSocket server
 const wss = new WebSocketServer({
@@ -137,13 +164,14 @@ async function start(): Promise<void> {
     await initRedis();
     logger.info('Redis initialized');
 
-    // Start HTTP/WebSocket server
+    // Start HTTP/HTTPS WebSocket server
+    const httpProtocol = protocol === 'wss' ? 'https' : 'http';
     server.listen(PORT, HOST, () => {
-      logger.info(`WebSocket Hub running on ws://${HOST}:${PORT}/ws`);
-      logger.info(`Health check: http://${HOST}:${PORT}/health`);
-      console.log(`\nWebSocket Hub started`);
-      console.log(`   WebSocket: ws://${HOST}:${PORT}/ws`);
-      console.log(`   Health: http://${HOST}:${PORT}/health\n`);
+      logger.info(`WebSocket Hub running on ${protocol}://${HOST}:${PORT}/ws`);
+      logger.info(`Health check: ${httpProtocol}://${HOST}:${PORT}/health`);
+      console.log(`\nWebSocket Hub started (${protocol.toUpperCase()} mode)`);
+      console.log(`   WebSocket: ${protocol}://${HOST}:${PORT}/ws`);
+      console.log(`   Health: ${httpProtocol}://${HOST}:${PORT}/health\n`);
     });
   } catch (error) {
     logger.error('Failed to start WebSocket Hub', { error: (error as Error).message });
