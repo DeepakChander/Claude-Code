@@ -160,7 +160,6 @@ async function handleBrainRequest(message: RedisMessage): Promise<void> {
 
         const sdkResult = await runSdkSync(content, workspacePath, {
           model: 'claude-sonnet-4-20250514',
-          systemPrompt: result.skill ? `You are an AI assistant specialized in ${result.skill}. Provide helpful, accurate, and detailed responses.` : undefined,
           maxTurns: 10,
         });
 
